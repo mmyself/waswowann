@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from typing import Any
 from uuid import uuid4
 
 from metacore.config import Settings, default_settings
@@ -11,6 +12,8 @@ from metacore.db import db, now_ms
 from metacore.models import (
     Edge,
     EdgeCreate,
+    EdgeDirection,
+    EdgeRole,
     Entity,
     EntityCreate,
     State,
@@ -168,6 +171,32 @@ class MetaCoreRepository:
             rows = conn.execute(query).fetchall()
         return [_row_to_entity(r) for r in rows]
 
+    def find_entities(
+        self,
+        query: str = "",
+        *,
+        category: str | None = None,
+        include_archived: bool = False,
+    ) -> list[Entity]:
+        """Search entities by case-insensitive name substring and optional category."""
+        clauses: list[str] = []
+        params: list[object] = []
+        if not include_archived:
+            clauses.append("archived = 0")
+        if category is not None:
+            clauses.append("category = ?")
+            params.append(category)
+        needle = query.strip().lower()
+        if needle:
+            escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append("LOWER(name) LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped}%")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM entities{where} ORDER BY created_at_ms, rowid"
+        with db(self.config) as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [_row_to_entity(r) for r in rows]
+
     # --- States ---
 
     def create_state(self, data: StateCreate) -> State:
@@ -256,6 +285,67 @@ class MetaCoreRepository:
             rows = conn.execute(query, params).fetchall()
         return [_row_to_state(r) for r in rows]
 
+    def update_state(self, state_id: str, **updates: Any) -> State:
+        """Update fields on an existing state while enforcing all StateCreate invariants."""
+        current = self.get_state(state_id)
+        if current is None:
+            raise KeyError(f"Unbekannter Zustand: {state_id}")
+        payload = current.model_dump(exclude={"created_at_ms", "updated_at_ms"})
+        payload.update(updates)
+        validated = StateCreate(**payload)
+        ts = now_ms()
+        with db(self.config) as conn:
+            conn.execute(
+                """
+                UPDATE states SET
+                    entity_id = ?, modality = ?, source = ?, measurement_source = ?,
+                    property_name = ?, label = ?,
+                    value_num = ?, value_sigma = ?, value_unit = ?, value_text = ?,
+                    distribution_kind = ?,
+                    lat = ?, lon = ?, sigma_meters = ?, location_label = ?,
+                    time_ms = ?, sigma_seconds = ?,
+                    target_min = ?, target_max = ?, target_preferred = ?, target_value_text = ?,
+                    target_earliest_ms = ?, target_latest_ms = ?, target_radius_meters = ?,
+                    threshold_ok = ?, threshold_fail = ?, priority = ?,
+                    meta_json = ?, updated_at_ms = ?
+                WHERE id = ?
+                """,
+                (
+                    validated.entity_id,
+                    validated.modality,
+                    validated.source,
+                    validated.measurement_source,
+                    validated.property_name,
+                    validated.label,
+                    validated.value_num,
+                    validated.value_sigma,
+                    validated.value_unit,
+                    validated.value_text,
+                    validated.distribution_kind,
+                    validated.lat,
+                    validated.lon,
+                    validated.sigma_meters,
+                    validated.location_label,
+                    validated.time_ms,
+                    validated.sigma_seconds,
+                    validated.target_min,
+                    validated.target_max,
+                    validated.target_preferred,
+                    validated.target_value_text,
+                    validated.target_earliest_ms,
+                    validated.target_latest_ms,
+                    validated.target_radius_meters,
+                    validated.threshold_ok,
+                    validated.threshold_fail,
+                    validated.priority,
+                    json.dumps(validated.meta),
+                    ts,
+                    state_id,
+                ),
+            )
+            row = conn.execute("SELECT * FROM states WHERE id = ?", (state_id,)).fetchone()
+        return _row_to_state(row)
+
     # --- Transformations ---
 
     def create_transformation(self, data: TransformationCreate) -> Transformation:
@@ -314,6 +404,47 @@ class MetaCoreRepository:
             rows = conn.execute(query, params).fetchall()
         return [_row_to_transformation(r) for r in rows]
 
+    def update_transformation(self, transformation_id: str, **updates: Any) -> Transformation:
+        """Update fields on an existing transformation while validating invariants."""
+        current = self.get_transformation(transformation_id)
+        if current is None:
+            raise KeyError(f"Unbekannte Transformation: {transformation_id}")
+        payload = current.model_dump(exclude={"created_at_ms", "updated_at_ms"})
+        payload.update(updates)
+        validated = TransformationCreate(**payload)
+        ts = now_ms()
+        with db(self.config) as conn:
+            conn.execute(
+                """
+                UPDATE transformations SET
+                    name = ?, modality = ?, driver = ?, template_id = ?, parent_id = ?,
+                    duration_seconds = ?, duration_sigma_seconds = ?, duration_source = ?,
+                    cost = ?, success_prob = ?, formula_json = ?, meta_json = ?,
+                    updated_at_ms = ?
+                WHERE id = ?
+                """,
+                (
+                    validated.name,
+                    validated.modality,
+                    validated.driver,
+                    validated.template_id,
+                    validated.parent_id,
+                    validated.duration_seconds,
+                    validated.duration_sigma_seconds,
+                    validated.duration_source,
+                    validated.cost,
+                    validated.success_prob,
+                    json.dumps(validated.formula),
+                    json.dumps(validated.meta),
+                    ts,
+                    transformation_id,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM transformations WHERE id = ?", (transformation_id,)
+            ).fetchone()
+        return _row_to_transformation(row)
+
     # --- Edges ---
 
     def create_edge(self, data: EdgeCreate) -> Edge:
@@ -349,13 +480,21 @@ class MetaCoreRepository:
             row = conn.execute("SELECT * FROM edges WHERE id = ?", (edge_id,)).fetchone()
         return _row_to_edge(row)
 
+    def get_edge(self, edge_id: str) -> Edge | None:
+        """Fetch an edge by ID or return None."""
+        with db(self.config) as conn:
+            row = conn.execute("SELECT * FROM edges WHERE id = ?", (edge_id,)).fetchone()
+        return _row_to_edge(row) if row else None
+
     def list_edges(
         self,
         *,
         transformation_id: str | None = None,
         state_id: str | None = None,
+        direction: EdgeDirection | None = None,
+        role: EdgeRole | None = None,
     ) -> list[Edge]:
-        """List edges optionally filtered by transformation or state."""
+        """List edges optionally filtered by transformation, state, direction, or role."""
         clauses: list[str] = []
         params: list[object] = []
         if transformation_id is not None:
@@ -364,8 +503,50 @@ class MetaCoreRepository:
         if state_id is not None:
             clauses.append("state_id = ?")
             params.append(state_id)
+        if direction is not None:
+            clauses.append("direction = ?")
+            params.append(direction)
+        if role is not None:
+            clauses.append("role = ?")
+            params.append(role)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         query = f"SELECT * FROM edges{where} ORDER BY created_at_ms, rowid"
         with db(self.config) as conn:
             rows = conn.execute(query, params).fetchall()
         return [_row_to_edge(r) for r in rows]
+
+    def update_edge(self, edge_id: str, **updates: Any) -> Edge:
+        """Update fields on an existing edge while validating invariants."""
+        current = self.get_edge(edge_id)
+        if current is None:
+            raise KeyError(f"Unbekannte Kante: {edge_id}")
+        payload = current.model_dump(exclude={"created_at_ms"})
+        payload.update(updates)
+        validated = EdgeCreate(**payload)
+        with db(self.config) as conn:
+            conn.execute(
+                """
+                UPDATE edges SET
+                    transformation_id = ?, state_id = ?, direction = ?, role = ?,
+                    logic_group = ?, branch_key = ?, is_selected = ?, outcome = ?,
+                    probability = ?, ratio_mean = ?, ratio_sigma = ?, resource_released = ?
+                WHERE id = ?
+                """,
+                (
+                    validated.transformation_id,
+                    validated.state_id,
+                    validated.direction,
+                    validated.role,
+                    validated.logic_group,
+                    validated.branch_key,
+                    int(validated.is_selected),
+                    validated.outcome,
+                    validated.probability,
+                    validated.ratio_mean,
+                    validated.ratio_sigma,
+                    int(validated.resource_released),
+                    edge_id,
+                ),
+            )
+            row = conn.execute("SELECT * FROM edges WHERE id = ?", (edge_id,)).fetchone()
+        return _row_to_edge(row)
