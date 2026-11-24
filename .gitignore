@@ -1,0 +1,32 @@
+# Python / Virtualenvs
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.installed.cfg
+*.egg
+dist/
+build/
+
+# Tests & Tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local data, SQLite & Environment
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.bak
+data/
+.env
+.env.*
+!.env.example
+
+# macOS / Editor
+.DS_Store
+.vscode/
+.idea/
