@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { predictedPointFeatures, predictedUncertaintyFeatures } from "../src/lib/contours";
 import { mergeFutureExtent } from "../src/lib/time-filter";
-import { buildTransformationHierarchy, computeCausalSteps, periodStatusLabel } from "../src/lib/zukunftsgraph";
-import type { MetaCoreEdge, MetaCoreState, MetaCoreTransformation, SpatialPrediction } from "../src/lib/types";
+import { buildCausalSvgLayout, buildTransformationHierarchy, computeCausalSteps, formatGoalBounds, periodStatusLabel } from "../src/lib/zukunftsgraph";
+import type { GoalEvaluation, MetaCoreEdge, MetaCoreState, MetaCoreTransformation, SpatialPrediction } from "../src/lib/types";
 
 describe("MetaCore frontend helpers", () => {
   it("builds dashed predicted uncertainty rings and points", () => {
@@ -174,5 +174,45 @@ describe("MetaCore frontend helpers", () => {
     expect(causal.orderedRoots.map((r) => r.id)).toEqual(["tx-parent", "tx-downstream"]);
     expect(periodStatusLabel("detected")).toBe("Erkannt");
     expect(periodStatusLabel("insufficient_data")).toBe("Zu wenig Zyklen");
+
+    const goalState: MetaCoreState = {
+      ...states[0],
+      id: "goal-1",
+      modality: "desired",
+      source: "user_goal",
+      label: "Ziel Block",
+      value_num: null,
+      value_sigma: null,
+      target_min: 900,
+      target_max: 1200,
+      target_earliest_ms: 1_795_500_000_000,
+      target_latest_ms: 1_795_759_200_000,
+    };
+    const boundsLabel = formatGoalBounds(goalState);
+    expect(boundsLabel).toContain("≥ 900 g");
+    expect(boundsLabel).toContain("≤ 1200 g");
+    expect(boundsLabel).toContain("–");
+
+    const evals: GoalEvaluation[] = [
+      {
+        goal_id: "goal-1",
+        entity_id: "ent-1",
+        property_name: "block",
+        label: "Ziel Block",
+        stage: 4,
+        status: "broken",
+        goal_probability: 0.05,
+        dimension_probs: { wie_viel: 0.9, wann: 0.05 },
+        broken_dimensions: ["wann"],
+        predicted_state_id: "st-mid",
+        alternative_branches: [],
+        summary: "wann gebrochen",
+      },
+    ];
+    const layout = buildCausalSvgLayout(txs, [...states, goalState], edges, evals);
+    const goalNode = layout.nodes.find((n) => n.id === "goal-1");
+    expect(goalNode?.status).toBe("broken");
+    expect(goalNode?.sublabel).toContain("≥ 900 g");
+    expect(layout.links.some((l) => l.role === "prüft" && l.status === "broken")).toBe(true);
   });
 });

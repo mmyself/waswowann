@@ -141,6 +141,9 @@ export const api = {
     value_sigma?: number;
     value_unit?: string;
     time_ms?: number;
+    context?: Record<string, string>;
+    assertion_confidence?: number;
+    evidence_refs?: Array<{ kind: string; ref: string; label?: string; checksum?: string }>;
   }) =>
     request<{ feedback: MutationFeedback; snapshot: ZukunftsgraphSnapshot }>("/api/zukunftsgraph/observations", {
       method: "POST",
@@ -150,12 +153,61 @@ export const api = {
     entity_id_or_obs_id: string;
     property_name?: string;
     label: string;
+    value_unit?: string;
     target_min?: number;
     target_max?: number;
+    target_earliest_ms?: number;
     target_latest_ms?: number;
     target_radius_meters?: number;
+    context?: Record<string, string>;
   }) =>
     request<{ goal: Record<string, unknown>; snapshot: ZukunftsgraphSnapshot }>("/api/zukunftsgraph/goals", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateMetaGoal: (
+    goalId: string,
+    patch: {
+      label?: string;
+      value_unit?: string;
+      target_min?: number | null;
+      target_max?: number | null;
+      target_earliest_ms?: number | null;
+      target_latest_ms?: number | null;
+      target_radius_meters?: number | null;
+      context?: Record<string, string>;
+    }
+  ) =>
+    request<{ goal: Record<string, unknown>; snapshot: ZukunftsgraphSnapshot }>(
+      `/api/zukunftsgraph/goals/${encodeURIComponent(goalId)}`,
+      { method: "PATCH", body: JSON.stringify(patch) }
+    ),
+  ingestRawSamples: (
+    samples: Array<{
+      entity_id: string;
+      property_name: string;
+      time_ms: number;
+      value_num: number;
+      value_sigma?: number;
+      value_unit?: string;
+      measurement_source?: string;
+      context?: Record<string, string>;
+      evidence_ref?: string;
+    }>
+  ) =>
+    request<{ inserted_count: number; samples: Array<Record<string, unknown>> }>("/api/zukunftsgraph/raw-samples", {
+      method: "POST",
+      body: JSON.stringify({ samples }),
+    }),
+  rollupRawSamples: (payload: {
+    entity_id?: string;
+    property_name?: string;
+    window_kind?: "fixed_seconds" | "hour" | "day" | "clock_phase";
+    window_seconds?: number;
+    target_unit?: string;
+    context_filter?: Record<string, string>;
+  } = {}) =>
+    request<{ created_count: number; snapshot: ZukunftsgraphSnapshot }>("/api/zukunftsgraph/raw-samples/rollup", {
       method: "POST",
       body: JSON.stringify(payload),
     }),

@@ -175,6 +175,14 @@ export type GoalStatus = "on_track" | "at_risk" | "broken" | "cancelled";
 export type StateModality = "observed" | "predicted" | "desired" | "cancelled";
 export type TransformationModality = "happened" | "planned" | "template" | "cancelled";
 export type EscalationAction = "widen_tolerance" | "switch_branch" | "abort_goal";
+export type MetaVisibility = "normal" | "local_only";
+
+export interface EvidenceRef {
+  kind: string;
+  ref: string;
+  label?: string;
+  checksum?: string;
+}
 
 export interface MetaCoreEntity {
   id: string;
@@ -184,6 +192,7 @@ export interface MetaCoreEntity {
   source: "observed" | "derived";
   parent_entity_id: string | null;
   archived: boolean;
+  visibility?: MetaVisibility;
   meta: Record<string, unknown>;
   created_at_ms: number;
   updated_at_ms: number;
@@ -209,9 +218,14 @@ export interface MetaCoreState {
   sigma_seconds: number | null;
   target_min: number | null;
   target_max: number | null;
+  target_earliest_ms?: number | null;
   target_latest_ms: number | null;
   target_radius_meters: number | null;
   priority: number;
+  context?: Record<string, string>;
+  evidence_refs?: EvidenceRef[];
+  assertion_confidence?: number;
+  visibility?: MetaVisibility;
   meta: Record<string, unknown>;
 }
 

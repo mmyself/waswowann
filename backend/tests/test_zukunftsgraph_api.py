@@ -230,3 +230,122 @@ def test_clocks_and_periodicity_endpoints(client: TestClient, config):
     assert res_tide.status_code == 200
     cands = {c["clock_id"]: c for c in res_tide.json()["candidates"]}
     assert cands["tidal_semidiurnal"]["status"] == "detected"
+
+
+def test_goal_patch_metadata_and_raw_samples_rollup_api(client: TestClient, config):
+    _insert_obs_with_photos(
+        config,
+        obs_id="indoor-hericium",
+        title="Igel-Stachelbart (Hericium erinaceus)",
+        environment="indoor",
+        photos=[
+            {"id": "m-her-1", "lat": 53.55828, "lon": 9.80831, "sigma_meters": 12.0, "time_ms": 1_795_500_000_000},
+        ],
+    )
+    snap = client.get("/api/zukunftsgraph/snapshot").json()
+    hericium_goal = next(s for s in snap["states"] if s["id"] == "goal:hericium_harvest")
+    pred_state = next(
+        s for s in snap["states"]
+        if s["entity_id"] == hericium_goal["entity_id"] and s["property_name"] == "harvest_ready" and s["modality"] == "predicted"
+    )
+    assert pred_state["time_ms"] is not None
+
+    # Tightening target_latest_ms well before predicted harvest flips goal to Stage 4 (wann broken)
+    tight_patch = client.patch(
+        "/api/zukunftsgraph/goals/goal:hericium_harvest",
+        headers=HEADERS,
+        json={
+            "target_min": 200.0,
+            "target_earliest_ms": pred_state["time_ms"] - 6 * 86_400_000,
+            "target_latest_ms": pred_state["time_ms"] - 3 * 86_400_000,
+        },
+    )
+    assert tight_patch.status_code == 200
+    tight_eval = tight_patch.json()["evaluation"]
+    assert tight_eval["stage"] == 4
+    assert "wann" in tight_eval["broken_dimensions"]
+
+    # Widening latest bound & keeping quantity restores Stage 2 (on_track)
+    wide_patch = client.patch(
+        "/api/zukunftsgraph/goals/goal:hericium_harvest",
+        headers=HEADERS,
+        json={
+            "target_min": 180.0,
+            "target_earliest_ms": None,
+            "target_latest_ms": pred_state["time_ms"] + 5 * 86_400_000,
+        },
+    )
+    assert wide_patch.status_code == 200
+    assert wide_patch.json()["evaluation"]["stage"] == 2
+    assert wide_patch.json()["goal"]["target_earliest_ms"] is None
+
+    # Record observation with context, assertion_confidence, and evidence_refs
+    obs_res = client.post(
+        "/api/zukunftsgraph/observations",
+        headers=HEADERS,
+        json={
+            "entity_id": "ent:indoor_klimabox",
+            "property_name": "temperature_c",
+            "label": "Schatten-Sensor 291.65 K",
+            "value_num": 291.65,
+            "value_sigma": 0.4,
+            "value_unit": "K",
+            "context": {"probe": "shade"},
+            "assertion_confidence": 0.9,
+            "evidence_refs": [{"kind": "sensor_log", "ref": "csv://box/1"}],
+        },
+    )
+    assert obs_res.status_code == 201
+    created_id = obs_res.json()["feedback"]["created_state_ids"][0]
+    created_state = next(s for s in obs_res.json()["snapshot"]["states"] if s["id"] == created_id)
+    assert created_state["context"] == {"probe": "shade"}
+    assert created_state["assertion_confidence"] == 0.9
+    assert created_state["evidence_refs"][0]["ref"] == "csv://box/1"
+
+    # Ingest raw high-frequency samples and roll up in °C
+    t0 = 1_795_600_000_000
+    raw_res = client.post(
+        "/api/zukunftsgraph/raw-samples",
+        headers=HEADERS,
+        json={
+            "samples": [
+                {
+                    "entity_id": "ent:indoor_klimabox",
+                    "property_name": "temperature_c",
+                    "time_ms": t0,
+                    "value_num": 18.0,
+                    "value_sigma": 0.2,
+                    "value_unit": "°C",
+                    "context": {"probe": "box_logger"},
+                },
+                {
+                    "entity_id": "ent:indoor_klimabox",
+                    "property_name": "temperature_c",
+                    "time_ms": t0 + 1_800_000,
+                    "value_num": 292.15,
+                    "value_sigma": 0.2,
+                    "value_unit": "K",
+                    "context": {"probe": "box_logger"},
+                },
+            ]
+        },
+    )
+    assert raw_res.status_code == 201
+    assert raw_res.json()["inserted_count"] == 2
+
+    rollup_res = client.post(
+        "/api/zukunftsgraph/raw-samples/rollup",
+        headers=HEADERS,
+        json={
+            "entity_id": "ent:indoor_klimabox",
+            "property_name": "temperature_c",
+            "window_kind": "day",
+            "target_unit": "°C",
+        },
+    )
+    assert rollup_res.status_code == 200
+    assert rollup_res.json()["created_count"] == 1
+    rolled = rollup_res.json()["created_states"][0]
+    assert rolled["value_unit"] == "°C"
+    assert math.isclose(rolled["value_num"], 18.5, rel_tol=1e-4)
+    assert rolled["meta"]["rollup"]["n"] == 2

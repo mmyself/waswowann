@@ -16,8 +16,10 @@ from app.services.metacore_bridge import (
     resolve_entity_id,
     sync_legacy_observations,
 )
+from metacore.clocks import ClockId
 from metacore.db import now_ms as mc_now_ms
-from metacore.models import StateCreate
+from metacore.models import EvidenceRef, RawSampleCreate, StateCreate, Visibility
+from metacore.rollup import RollupWindowKind
 
 router = APIRouter(prefix="/api/zukunftsgraph", tags=["zukunftsgraph"])
 
@@ -39,19 +41,67 @@ class MetaObservationRequest(BaseModel):
     value_unit: str = Field(default="", max_length=40)
     time_ms: int | None = None
     measurement_source: str = Field(default="web_ui", max_length=200)
+    context: dict[str, str] = Field(default_factory=dict)
+    evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
+    assertion_confidence: float = Field(default=1.0, gt=0.0, le=1.0)
+    visibility: Visibility = "normal"
 
 
 class MetaGoalRequest(BaseModel):
     entity_id_or_obs_id: str = Field(min_length=1, max_length=128)
     property_name: str = Field(default="harvest_ready", min_length=1, max_length=120)
     label: str = Field(min_length=1, max_length=240)
+    value_unit: str = Field(default="", max_length=40)
     target_min: float | None = None
     target_max: float | None = None
+    target_earliest_ms: int | None = None
     target_latest_ms: int | None = None
     target_radius_meters: float | None = Field(default=None, gt=0.0)
     lat: float | None = Field(default=None, ge=-90.0, le=90.0)
     lon: float | None = Field(default=None, ge=-180.0, le=180.0)
     priority: float = Field(default=1.0, ge=0.0)
+    context: dict[str, str] = Field(default_factory=dict)
+    visibility: Visibility = "normal"
+
+
+class MetaGoalPatchRequest(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=240)
+    value_unit: str | None = Field(default=None, max_length=40)
+    target_min: float | None = None
+    target_max: float | None = None
+    target_earliest_ms: int | None = None
+    target_latest_ms: int | None = None
+    target_radius_meters: float | None = Field(default=None, gt=0.0)
+    priority: float | None = Field(default=None, ge=0.0)
+    context: dict[str, str] | None = None
+
+
+class RawSampleItemRequest(BaseModel):
+    entity_id: str = Field(min_length=1, max_length=128)
+    property_name: str = Field(min_length=1, max_length=120)
+    time_ms: int
+    value_num: float
+    value_sigma: float | None = Field(default=None, ge=0.0)
+    value_unit: str = Field(default="", max_length=40)
+    measurement_source: str = Field(default="", max_length=200)
+    context: dict[str, str] = Field(default_factory=dict)
+    evidence_ref: str = Field(default="", max_length=500)
+
+
+class RawSampleBatchRequest(BaseModel):
+    samples: list[RawSampleItemRequest] = Field(min_length=1, max_length=5000)
+
+
+class RawSampleRollupRequest(BaseModel):
+    entity_id: str | None = Field(default=None, min_length=1, max_length=128)
+    property_name: str | None = Field(default=None, min_length=1, max_length=120)
+    window_kind: RollupWindowKind = "day"
+    window_seconds: float = Field(default=3_600.0, gt=0.0)
+    clock_id: ClockId = "solar_day"
+    phase_bins: int | None = Field(default=None, ge=1, le=24)
+    target_unit: str | None = Field(default=None, max_length=40)
+    context_filter: dict[str, str] | None = None
+    only_unrolled: bool = True
 
 
 class EscalationResolveRequest(BaseModel):
@@ -103,6 +153,7 @@ def post_observation(payload: MetaObservationRequest) -> dict[str, Any]:
         else f"{payload.property_name}: {payload.value_num} {payload.value_unit}".strip()
     )
     try:
+        parsed_refs = [EvidenceRef(**ref) for ref in payload.evidence_refs]
         fb = engine.record_observation(
             StateCreate(
                 entity_id=entity_id,
@@ -116,9 +167,13 @@ def post_observation(payload: MetaObservationRequest) -> dict[str, Any]:
                 value_unit=payload.value_unit,
                 time_ms=t_ms,
                 sigma_seconds=60.0,
+                context=payload.context,
+                evidence_refs=parsed_refs,
+                assertion_confidence=payload.assertion_confidence,
+                visibility=payload.visibility,
             )
         )
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         raise _error(400, "INVALID_OBSERVATION", str(exc)) from exc
 
     return {
@@ -154,22 +209,127 @@ def post_goal(payload: MetaGoalRequest) -> dict[str, Any]:
                 source="user_goal",
                 property_name=payload.property_name,
                 label=payload.label.strip(),
+                value_unit=payload.value_unit,
                 lat=goal_lat,
                 lon=goal_lon,
                 target_min=payload.target_min,
                 target_max=payload.target_max,
+                target_earliest_ms=payload.target_earliest_ms,
                 target_latest_ms=payload.target_latest_ms,
                 target_radius_meters=payload.target_radius_meters,
                 priority=payload.priority,
+                context=payload.context,
+                visibility=payload.visibility,
             )
         )
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         raise _error(400, "INVALID_GOAL", str(exc)) from exc
 
     evaluation = engine.evaluate_goal(goal_state.id)
     return {
         "goal": goal_state.model_dump(),
         "evaluation": evaluation.model_dump(),
+        "snapshot": build_live_snapshot(auto_sync=False),
+    }
+
+
+@router.patch("/goals/{goal_id}")
+def patch_goal(goal_id: str, payload: MetaGoalPatchRequest) -> dict[str, Any]:
+    repo, engine = open_metacore()
+    current = repo.get_state(goal_id)
+    if current is None:
+        raise _error(404, "GOAL_NOT_FOUND", f"Unbekanntes Ziel: {goal_id}")
+    if current.modality != "desired":
+        raise _error(400, "NOT_A_GOAL", f"Zustand '{goal_id}' ist kein aktives Ziel (desired).")
+
+    updates: dict[str, Any] = {}
+    for field in payload.model_fields_set:
+        val = getattr(payload, field)
+        if field in ("label", "value_unit", "priority", "context") and val is None:
+            raise _error(400, "INVALID_GOAL_PATCH", f"Feld '{field}' darf nicht null sein.")
+        updates[field] = val.strip() if field == "label" and isinstance(val, str) else val
+
+    if not updates:
+        evaluation = engine.evaluate_goal(goal_id)
+        return {
+            "goal": current.model_dump(),
+            "evaluation": evaluation.model_dump(),
+            "snapshot": build_live_snapshot(auto_sync=False),
+        }
+
+    try:
+        updated = repo.update_state(goal_id, **updates)
+    except (ValueError, TypeError) as exc:
+        raise _error(400, "INVALID_GOAL_PATCH", str(exc)) from exc
+
+    evaluation = engine.evaluate_goal(goal_id)
+    return {
+        "goal": updated.model_dump(),
+        "evaluation": evaluation.model_dump(),
+        "snapshot": build_live_snapshot(auto_sync=False),
+    }
+
+
+@router.post("/raw-samples", status_code=201)
+def post_raw_samples(payload: RawSampleBatchRequest) -> dict[str, Any]:
+    repo, engine = open_metacore()
+    parsed: list[RawSampleCreate] = []
+    for item in payload.samples:
+        resolved = resolve_entity_id(repo, item.entity_id)
+        if resolved is None:
+            raise _error(404, "ENTITY_NOT_FOUND", f"Unbekannte Weltlinie: {item.entity_id}")
+        try:
+            parsed.append(
+                RawSampleCreate(
+                    entity_id=resolved,
+                    property_name=item.property_name,
+                    time_ms=item.time_ms,
+                    value_num=item.value_num,
+                    value_sigma=item.value_sigma,
+                    value_unit=item.value_unit,
+                    measurement_source=item.measurement_source,
+                    context=item.context,
+                    evidence_ref=item.evidence_ref,
+                )
+            )
+        except (ValueError, TypeError) as exc:
+            raise _error(400, "INVALID_RAW_SAMPLE", str(exc)) from exc
+
+    created = engine.ingest_raw_samples(parsed)
+    return {
+        "inserted_count": len(created),
+        "samples": [s.model_dump() for s in created],
+    }
+
+
+@router.post("/raw-samples/rollup")
+def post_raw_samples_rollup(payload: RawSampleRollupRequest | None = None) -> dict[str, Any]:
+    req = payload or RawSampleRollupRequest()
+    repo, engine = open_metacore()
+    resolved_ent: str | None = None
+    if req.entity_id:
+        resolved_ent = resolve_entity_id(repo, req.entity_id)
+        if resolved_ent is None:
+            raise _error(404, "ENTITY_NOT_FOUND", f"Unbekannte Weltlinie: {req.entity_id}")
+    try:
+        created = engine.rollup_raw_samples(
+            entity_id=resolved_ent,
+            property_name=req.property_name,
+            window_kind=req.window_kind,
+            window_seconds=req.window_seconds,
+            clock_id=req.clock_id,
+            phase_bins=req.phase_bins,
+            target_unit=req.target_unit,
+            context_filter=req.context_filter,
+            only_unrolled=req.only_unrolled,
+            tz_name=config_module.settings.import_timezone,
+        )
+    except (ValueError, TypeError) as exc:
+        raise _error(400, "ROLLUP_FAILED", str(exc)) from exc
+
+    return {
+        "created_count": len(created),
+        "created_states": [s.model_dump() for s in created],
         "snapshot": build_live_snapshot(auto_sync=False),
     }
 

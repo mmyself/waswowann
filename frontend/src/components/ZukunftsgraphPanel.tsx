@@ -1,8 +1,19 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
+import { DateTime } from "luxon";
 import { api, ApiError } from "@/lib/api";
-import { computeCausalSteps, formatDurationDays, formatMetaDate, goalStatusLabel, periodStatusLabel } from "@/lib/zukunftsgraph";
+import { DISPLAY_TIMEZONE } from "@/lib/time-filter";
+import {
+  buildCausalSvgLayout,
+  computeCausalSteps,
+  formatDurationDays,
+  formatGoalBounds,
+  formatMetaDate,
+  goalStatusLabel,
+  periodStatusLabel,
+  type CausalVisualStatus,
+} from "@/lib/zukunftsgraph";
 import type {
   EscalationAction,
   GoalEvaluation,
@@ -14,6 +25,40 @@ import type {
 } from "@/lib/types";
 
 const MONTHS_AXIS = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+
+const STATUS_STYLE: Record<CausalVisualStatus, { stroke: string; fill: string; text: string }> = {
+  on_track: { stroke: "#15803d", fill: "#ecfdf5", text: "#14532d" },
+  at_risk: { stroke: "#ca8a04", fill: "#fefce8", text: "#713f12" },
+  broken: { stroke: "#dc2626", fill: "#fef2f2", text: "#7f1d1d" },
+  cancelled: { stroke: "#64748b", fill: "#f4f4f5", text: "#475569" },
+  observed: { stroke: "#2563eb", fill: "#eff6ff", text: "#1e3a8a" },
+  happened: { stroke: "#0f766e", fill: "#f0fdfa", text: "#134e4a" },
+};
+
+function msToIsoDate(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return "";
+  return DateTime.fromMillis(ms, { zone: DISPLAY_TIMEZONE }).toISODate() ?? "";
+}
+
+function isoDateToMs(iso: string, endOfDay = false): number | null {
+  const trimmed = iso.trim();
+  if (!trimmed) return null;
+  const dt = DateTime.fromISO(trimmed, { zone: DISPLAY_TIMEZONE });
+  if (!dt.isValid) return null;
+  return (endOfDay ? dt.endOf("day") : dt.startOf("day")).toMillis();
+}
+
+function parseContextInput(raw: string): Record<string, string> {
+  const ctx: Record<string, string> = {};
+  for (const part of raw.split(",")) {
+    const idx = part.indexOf("=");
+    if (idx <= 0) continue;
+    const k = part.slice(0, idx).trim();
+    const v = part.slice(idx + 1).trim();
+    if (k && v) ctx[k] = v;
+  }
+  return ctx;
+}
 
 interface Props {
   snapshot: ZukunftsgraphSnapshot | null;
@@ -40,6 +85,13 @@ export default function ZukunftsgraphPanel({
   const [obsVal, setObsVal] = useState("18.5");
   const [obsSigma, setObsSigma] = useState("0.5");
   const [obsUnit, setObsUnit] = useState("°C");
+  const [obsContext, setObsContext] = useState("");
+  const [obsConfidence, setObsConfidence] = useState("100");
+  const [editingGoalId, setEditingGoalId] = useState<string | null>(null);
+  const [goalMinDraft, setGoalMinDraft] = useState("");
+  const [goalUnitDraft, setGoalUnitDraft] = useState("");
+  const [goalEarliestDraft, setGoalEarliestDraft] = useState("");
+  const [goalLatestDraft, setGoalLatestDraft] = useState("");
   const [periodPreset, setPeriodPreset] = useState<"archive" | "weekly" | "tidal" | "flush">("archive");
   const [customPeriodReport, setCustomPeriodReport] = useState<PeriodicityReport | null>(null);
   const [periodBusy, setPeriodBusy] = useState(false);
@@ -74,6 +126,18 @@ export default function ZukunftsgraphPanel({
         (g) => includeCancelled || g.status !== "cancelled"
       ),
     [snapshot?.goal_evaluations, includeCancelled]
+  );
+
+  const svgLayout = useMemo(
+    () =>
+      buildCausalSvgLayout(
+        snapshot?.transformations ?? [],
+        snapshot?.states ?? [],
+        snapshot?.edges ?? [],
+        snapshot?.goal_evaluations ?? [],
+        includeCancelled
+      ),
+    [snapshot?.transformations, snapshot?.states, snapshot?.edges, snapshot?.goal_evaluations, includeCancelled]
   );
 
   const groupedSeasons = useMemo(() => {
@@ -142,13 +206,19 @@ export default function ZukunftsgraphPanel({
     if (!entityId) return;
     const valNum = Number(obsVal.replace(",", "."));
     const sigNum = Number(obsSigma.replace(",", "."));
+    const confPct = Number(obsConfidence.replace(",", "."));
     if (!Number.isFinite(valNum) || !Number.isFinite(sigNum) || sigNum < 0) {
       setActionError("Bitte gültigen Messwert und Standardabweichung (≥ 0) eingeben.");
+      return;
+    }
+    if (!Number.isFinite(confPct) || confPct <= 0 || confPct > 100) {
+      setActionError("Bitte eine gültige Sicherheit zwischen 1 % und 100 % angeben.");
       return;
     }
     setBusy(true);
     setActionError("");
     try {
+      const ctx = parseContextInput(obsContext);
       const res = await api.recordMetaObservation({
         entity_id: entityId,
         property_name: obsProp.trim() || "temperature_c",
@@ -156,10 +226,55 @@ export default function ZukunftsgraphPanel({
         value_sigma: sigNum,
         value_unit: obsUnit.trim(),
         time_ms: snapshot.now_ms,
+        context: Object.keys(ctx).length ? ctx : undefined,
+        assertion_confidence: confPct / 100,
       });
       onSnapshotChange(res.snapshot);
     } catch (cause) {
       setActionError(cause instanceof ApiError ? cause.message : "Messwert konnte nicht erfasst werden.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openGoalEditor = (goalId: string) => {
+    const st = stateMap.get(goalId);
+    if (!st) return;
+    setEditingGoalId(goalId);
+    setGoalMinDraft(st.target_min !== null && st.target_min !== undefined ? String(st.target_min) : "");
+    setGoalUnitDraft(st.value_unit || "");
+    setGoalEarliestDraft(msToIsoDate(st.target_earliest_ms));
+    setGoalLatestDraft(msToIsoDate(st.target_latest_ms));
+    setActionError("");
+  };
+
+  const handleSaveGoalEdit = async (event: FormEvent<HTMLFormElement>, goalId: string) => {
+    event.preventDefault();
+    const minStr = goalMinDraft.trim();
+    const parsedMin = minStr === "" ? null : Number(minStr.replace(",", "."));
+    if (minStr !== "" && (parsedMin === null || !Number.isFinite(parsedMin))) {
+      setActionError("Bitte eine gültige Mindestmenge eingeben.");
+      return;
+    }
+    const earliestMs = isoDateToMs(goalEarliestDraft, false);
+    const latestMs = isoDateToMs(goalLatestDraft, true);
+    if (earliestMs !== null && latestMs !== null && earliestMs > latestMs) {
+      setActionError("Das Frühestens-Datum darf nicht nach dem Spätestens-Datum liegen.");
+      return;
+    }
+    setBusy(true);
+    setActionError("");
+    try {
+      const res = await api.updateMetaGoal(goalId, {
+        value_unit: goalUnitDraft.trim(),
+        target_min: parsedMin,
+        target_earliest_ms: earliestMs,
+        target_latest_ms: latestMs,
+      });
+      onSnapshotChange(res.snapshot);
+      setEditingGoalId(null);
+    } catch (cause) {
+      setActionError(cause instanceof ApiError ? cause.message : "Ziel konnte nicht aktualisiert werden.");
     } finally {
       setBusy(false);
     }
@@ -390,61 +505,264 @@ export default function ZukunftsgraphPanel({
       )}
 
       <div className="zg-goals-grid">
-        {activeGoals.map((goal) => (
-          <article key={goal.goal_id} className={`zg-goal-card is-${goal.status}`}>
-            <div className="zg-goal-top">
-              <span className={`zg-stage-pill is-${goal.status}`}>{goalStatusLabel(goal.status)}</span>
-              <strong>{Math.round(goal.goal_probability * 100)} %</strong>
-            </div>
-            <h3>{goal.label}</h3>
-            <p className="zg-goal-summary">{goal.summary}</p>
-            <div className="zg-dims">
-              {Object.entries(goal.dimension_probs).map(([dim, prob]) => (
-                <div key={dim} className={`zg-dim ${goal.broken_dimensions.includes(dim) ? "is-broken" : ""}`}>
-                  <span>{dim}</span>
-                  <div className="zg-dim-bar"><i style={{ width: `${Math.round(prob * 100)}%` }} /></div>
-                  <small>{Math.round(prob * 100)}%</small>
-                </div>
-              ))}
-            </div>
-            {goal.status !== "cancelled" && (
-              <div className="zg-goal-actions">
-                {goal.alternative_branches
-                  .filter((b) => !b.is_selected)
-                  .map((b) => (
-                    <button
-                      key={b.branch_key}
-                      type="button"
-                      className="secondary-action"
-                      disabled={busy}
-                      onClick={() => handleEscalation(goal, "switch_branch", b.branch_key)}
-                    >
-                      Auf Zweig „{b.branch_key}“ wechseln ({Math.round(b.goal_probability * 100)} %)
-                    </button>
-                  ))}
-                {goal.status !== "on_track" && (
+        {activeGoals.map((goal) => {
+          const goalState = stateMap.get(goal.goal_id);
+          const isEditingThisGoal = editingGoalId === goal.goal_id;
+          return (
+            <article key={goal.goal_id} className={`zg-goal-card is-${goal.status}`}>
+              <div className="zg-goal-top">
+                <span className={`zg-stage-pill is-${goal.status}`}>{goalStatusLabel(goal.status)}</span>
+                <strong>{Math.round(goal.goal_probability * 100)} %</strong>
+              </div>
+              <h3>{goal.label}</h3>
+              {goalState && (
+                <p className="zg-goal-bounds">{formatGoalBounds(goalState)}</p>
+              )}
+              <p className="zg-goal-summary">{goal.summary}</p>
+              <div className="zg-dims">
+                {Object.entries(goal.dimension_probs).map(([dim, prob]) => (
+                  <div key={dim} className={`zg-dim ${goal.broken_dimensions.includes(dim) ? "is-broken" : ""}`}>
+                    <span>{dim}</span>
+                    <div className="zg-dim-bar"><i style={{ width: `${Math.round(prob * 100)}%` }} /></div>
+                    <small>{Math.round(prob * 100)}%</small>
+                  </div>
+                ))}
+              </div>
+              {goal.status !== "cancelled" && (
+                <div className="zg-goal-actions">
                   <button
                     type="button"
                     className="secondary-action"
                     disabled={busy}
-                    onClick={() => handleEscalation(goal, "widen_tolerance")}
+                    onClick={() => (isEditingThisGoal ? setEditingGoalId(null) : openGoalEditor(goal.goal_id))}
                   >
-                    Toleranz lockern
+                    {isEditingThisGoal ? "Editor schließen" : "Menge & Zeitpunkt ändern"}
                   </button>
-                )}
-                <button
-                  type="button"
-                  className="text-action"
-                  disabled={busy}
-                  onClick={() => handleEscalation(goal, "abort_goal")}
-                >
-                  Ziel abbrechen
-                </button>
-              </div>
-            )}
-          </article>
-        ))}
+                  {goal.alternative_branches
+                    .filter((b) => !b.is_selected)
+                    .map((b) => (
+                      <button
+                        key={b.branch_key}
+                        type="button"
+                        className="secondary-action"
+                        disabled={busy}
+                        onClick={() => handleEscalation(goal, "switch_branch", b.branch_key)}
+                      >
+                        Auf Zweig „{b.branch_key}“ wechseln ({Math.round(b.goal_probability * 100)} %)
+                      </button>
+                    ))}
+                  {goal.status !== "on_track" && (
+                    <button
+                      type="button"
+                      className="secondary-action"
+                      disabled={busy}
+                      onClick={() => handleEscalation(goal, "widen_tolerance")}
+                    >
+                      Toleranz lockern
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="text-action"
+                    disabled={busy}
+                    onClick={() => handleEscalation(goal, "abort_goal")}
+                  >
+                    Ziel abbrechen
+                  </button>
+                </div>
+              )}
+              {isEditingThisGoal && (
+                <form className="zg-goal-editor" onSubmit={(e) => handleSaveGoalEdit(e, goal.goal_id)}>
+                  <div className="form-two-col">
+                    <label>
+                      Mindestmenge
+                      <input
+                        inputMode="decimal"
+                        value={goalMinDraft}
+                        onChange={(e) => setGoalMinDraft(e.target.value)}
+                        placeholder="z. B. 200"
+                      />
+                    </label>
+                    <label>
+                      Einheit
+                      <input
+                        value={goalUnitDraft}
+                        onChange={(e) => setGoalUnitDraft(e.target.value)}
+                        maxLength={20}
+                        placeholder="g, ml, °C"
+                      />
+                    </label>
+                  </div>
+                  <div className="form-two-col">
+                    <label>
+                      Frühestens (ab)
+                      <input
+                        type="date"
+                        value={goalEarliestDraft}
+                        onChange={(e) => setGoalEarliestDraft(e.target.value)}
+                      />
+                    </label>
+                    <label>
+                      Spätestens (bis)
+                      <input
+                        type="date"
+                        value={goalLatestDraft}
+                        onChange={(e) => setGoalLatestDraft(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <div className="zg-goal-actions">
+                    <button type="submit" className="save-button" disabled={busy}>
+                      Speichern &amp; neu bewerten ↗
+                    </button>
+                  </div>
+                </form>
+              )}
+            </article>
+          );
+        })}
       </div>
+
+      {svgLayout.nodes.length > 0 && (
+        <div className="zg-svg-card">
+          <div className="zg-section-title">
+            <h3>Kausal-Graph (Was → Wo → Wann auf der Weltlinie)</h3>
+            <span>{svgLayout.nodes.length} Knoten · {svgLayout.links.length} Verbindungen · Klick für Kausal-Linse</span>
+          </div>
+          <div className="zg-svg-wrap">
+            <svg
+              viewBox={`0 0 ${svgLayout.width} ${svgLayout.height}`}
+              width="100%"
+              role="img"
+              aria-label="Interaktiver Zukunftsgraph SVG"
+            >
+              <defs>
+                {(Object.keys(STATUS_STYLE) as CausalVisualStatus[]).map((stKey) => (
+                  <marker
+                    key={stKey}
+                    id={`zg-arrow-${stKey}`}
+                    markerWidth="8"
+                    markerHeight="8"
+                    refX="7"
+                    refY="3"
+                    orient="auto"
+                  >
+                    <path d="M0,0 L8,3 L0,6 Z" fill={STATUS_STYLE[stKey].stroke} />
+                  </marker>
+                ))}
+              </defs>
+              <line
+                x1={svgLayout.nowX}
+                y1={28}
+                x2={svgLayout.nowX}
+                y2={svgLayout.height - 10}
+                stroke="#0f172a"
+                strokeWidth="1.5"
+                strokeDasharray="4 4"
+                opacity="0.35"
+              />
+              <rect x={svgLayout.nowX - 24} y={8} width={48} height={18} rx={9} fill="#0f172a" />
+              <text x={svgLayout.nowX} y={20} textAnchor="middle" fontSize="9.5" fontWeight="700" fill="#ffffff">
+                JETZT
+              </text>
+              {svgLayout.columns.map((col, idx) => (
+                <text
+                  key={`${col.label}-${idx}`}
+                  x={col.x}
+                  y={24}
+                  textAnchor="middle"
+                  fontSize="10"
+                  fontWeight="700"
+                  fill="#64748b"
+                >
+                  {col.label}
+                </text>
+              ))}
+              {svgLayout.links.map((lk) => {
+                const pal = STATUS_STYLE[lk.status];
+                const dx = Math.max(28, (lk.x2 - lk.x1) * 0.45);
+                const d = `M ${lk.x1} ${lk.y1} C ${lk.x1 + dx} ${lk.y1}, ${lk.x2 - dx} ${lk.y2}, ${lk.x2} ${lk.y2}`;
+                return (
+                  <g key={lk.key} opacity={lk.unselected ? 0.32 : 0.9}>
+                    <path
+                      d={d}
+                      fill="none"
+                      stroke={pal.stroke}
+                      strokeWidth={lk.unselected ? 1.2 : 1.8}
+                      strokeDasharray={lk.dashed ? "5 4" : undefined}
+                      markerEnd={`url(#zg-arrow-${lk.status})`}
+                    />
+                    <text
+                      x={(lk.x1 + lk.x2) / 2}
+                      y={(lk.y1 + lk.y2) / 2 - 4}
+                      textAnchor="middle"
+                      fontSize="8.5"
+                      fill="#64748b"
+                    >
+                      {lk.role}
+                    </text>
+                  </g>
+                );
+              })}
+              {svgLayout.nodes.map((node) => {
+                const pal = STATUS_STYLE[node.status];
+                const isSelected = selectedNode?.id === node.id;
+                const titleShort = node.title.length > 25 ? `${node.title.slice(0, 24)}…` : node.title;
+                const subShort = node.sublabel.length > 28 ? `${node.sublabel.slice(0, 27)}…` : node.sublabel;
+                const badgeShort = node.badge.length > 28 ? `${node.badge.slice(0, 27)}…` : node.badge;
+                return (
+                  <g
+                    key={node.key}
+                    className="zg-svg-node"
+                    opacity={node.unselected ? 0.45 : 1}
+                    onClick={() => setSelectedNode({ kind: node.kind, id: node.id })}
+                  >
+                    <rect
+                      x={node.x - node.width / 2}
+                      y={node.y - node.height / 2}
+                      width={node.width}
+                      height={node.height}
+                      rx={node.kind === "tx" ? 14 : 7}
+                      fill={pal.fill}
+                      stroke={pal.stroke}
+                      strokeWidth={isSelected ? 2.8 : 1.6}
+                      strokeDasharray={node.dashed ? "6 3" : node.dotted ? "2 3" : undefined}
+                    />
+                    <text
+                      x={node.x}
+                      y={node.y - 8}
+                      textAnchor="middle"
+                      fontSize="10.5"
+                      fontWeight="700"
+                      fill={pal.text}
+                    >
+                      {titleShort}
+                    </text>
+                    <text x={node.x} y={node.y + 7} textAnchor="middle" fontSize="9.5" fill="#0f172a">
+                      {subShort}
+                    </text>
+                    <text x={node.x} y={node.y + 19} textAnchor="middle" fontSize="8" fill="#64748b">
+                      {badgeShort}
+                    </text>
+                    {node.childCount > 0 && (
+                      <text
+                        x={node.x + node.width / 2 - 8}
+                        y={node.y - node.height / 2 + 11}
+                        textAnchor="end"
+                        fontSize="8"
+                        fontWeight="700"
+                        fill="#7c3aed"
+                      >
+                        +{node.childCount}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+        </div>
+      )}
 
       <div className="zg-main-grid">
         <div className="zg-chain-list">
@@ -557,12 +875,56 @@ export default function ZukunftsgraphPanel({
               <div>
                 <h3>{inspectedState.label}</h3>
                 <p>Eigenschaft: <code>{inspectedState.property_name}</code> · Quelle: <strong>{inspectedState.source}</strong></p>
+                {inspectedState.modality === "desired" && (
+                  <>
+                    <p>Ziel-Grenzen: <strong>{formatGoalBounds(inspectedState)}</strong></p>
+                    {(inspectedState.target_earliest_ms || inspectedState.target_latest_ms) && (
+                      <p>
+                        Ziel-Zeitfenster:{" "}
+                        <strong>
+                          {inspectedState.target_earliest_ms ? formatMetaDate(inspectedState.target_earliest_ms, true) : "offen"}
+                          {" – "}
+                          {inspectedState.target_latest_ms ? formatMetaDate(inspectedState.target_latest_ms, true) : "offen"}
+                        </strong>
+                      </p>
+                    )}
+                  </>
+                )}
                 {inspectedState.value_num !== null && (
                   <p>Wert: <strong>{inspectedState.value_num.toFixed(1)}{inspectedState.value_sigma ? ` ± ${inspectedState.value_sigma.toFixed(1)}` : ""} {inspectedState.value_unit}</strong></p>
                 )}
                 {inspectedState.time_ms !== null && <p>Zeit: <strong>{formatMetaDate(inspectedState.time_ms, true)}</strong></p>}
                 {inspectedState.lat !== null && inspectedState.lon !== null && (
                   <p>Ort: <strong>{inspectedState.lat.toFixed(5)}, {inspectedState.lon.toFixed(5)}</strong> (±{inspectedState.sigma_meters?.toFixed(1) ?? "?"} m)</p>
+                )}
+                {inspectedState.context && Object.keys(inspectedState.context).length > 0 && (
+                  <p>
+                    Kontext:{" "}
+                    <strong>
+                      {Object.entries(inspectedState.context)
+                        .map(([k, v]) => `${k}=${v}`)
+                        .join(", ")}
+                    </strong>
+                  </p>
+                )}
+                {inspectedState.assertion_confidence !== undefined && inspectedState.assertion_confidence < 1.0 && (
+                  <p>Epistemische Sicherheit: <strong>{Math.round(inspectedState.assertion_confidence * 100)} %</strong></p>
+                )}
+                {inspectedState.evidence_refs && inspectedState.evidence_refs.length > 0 && (
+                  <p>
+                    Belege:{" "}
+                    <strong>
+                      {inspectedState.evidence_refs.map((r) => r.label || r.ref).join(", ")}
+                    </strong>
+                  </p>
+                )}
+                {inspectedState.meta?.rollup != null && (
+                  <p>
+                    Roll-Up:{" "}
+                    <strong>
+                      n={String((inspectedState.meta.rollup as Record<string, unknown>).n ?? "?")}
+                    </strong>
+                  </p>
                 )}
                 {inspectedEntity && typeof inspectedEntity.meta?.legacy_obs_id === "string" && (
                   <button
@@ -614,6 +976,10 @@ export default function ZukunftsgraphPanel({
             <div className="form-two-col">
               <label>Wert<input inputMode="decimal" value={obsVal} onChange={(e) => setObsVal(e.target.value)} required /></label>
               <label>± σ<input inputMode="decimal" value={obsSigma} onChange={(e) => setObsSigma(e.target.value)} required /></label>
+            </div>
+            <div className="form-two-col">
+              <label>Kontext (k=v)<input value={obsContext} onChange={(e) => setObsContext(e.target.value)} placeholder="z. B. probe=shade" /></label>
+              <label>Sicherheit (%)<input inputMode="decimal" value={obsConfidence} onChange={(e) => setObsConfidence(e.target.value)} /></label>
             </div>
             <button type="submit" className="save-button" disabled={busy}>
               Messwert übernehmen <span aria-hidden="true">↗</span>
