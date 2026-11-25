@@ -19,6 +19,7 @@ def test_build_demo_scenarios_payload_real_engine_metrics() -> None:
         "riesenschirmling",
         "roboter_wasser",
         "igel_stachelbart",
+        "substrat_rezept",
     ]
     scenarios = payload["scenarios"]
 
@@ -100,6 +101,22 @@ def test_build_demo_scenarios_payload_real_engine_metrics() -> None:
     dur = ig[1]["templates"][0]["duration_seconds"]
     assert dur is not None and 8.5 * 86_400 <= dur <= 9.2 * 86_400
 
+    # 5. Substrat-Rezept multi-input recipe_mix + ratio guard transitions
+    sub = scenarios["substrat_rezept"]["phases"]
+    assert len(sub) == 3
+    sub_totals0 = [
+        s for s in sub[0]["states"] if s["property_name"] == "total_mass" and s["modality"] == "predicted"
+    ]
+    batch_total = [s for s in sub_totals0 if "Gesamt" in s["label"]]
+    assert len(batch_total) == 1
+    assert batch_total[0]["value_num"] == pytest.approx(1400.0)
+    assert batch_total[0]["value_sigma"] == pytest.approx(math.sqrt(150.0))
+    assert sub[0]["goal_evaluations"][0]["stage"] == 2
+    assert sub[1]["goal_evaluations"][0]["stage"] == 4
+    assert "vorbedingung" in sub[1]["goal_evaluations"][0]["broken_dimensions"]
+    assert sub[2]["goal_evaluations"][0]["stage"] == 2
+    assert sub[2]["goal_evaluations"][0]["status"] == "on_track"
+
 
 def test_render_html_valid_and_js_syntax_passes_node_check(tmp_path: Path) -> None:
     payload = build_demo_scenarios_payload()
@@ -112,6 +129,7 @@ def test_render_html_valid_and_js_syntax_passes_node_check(tmp_path: Path) -> No
     assert "Igel-Stachelbart" in html
     assert "Riesenschirmling" in html
     assert "Greifer 1" in html
+    assert "Substrat-Rezept" in html
 
     scripts = re.findall(r"<script>([\s\S]*?)</script>", html)
     assert len(scripts) == 1

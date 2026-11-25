@@ -79,14 +79,92 @@ def seed_riesenschirmling(
 
     tpl_trigger = repo.create_transformation(
         TransformationCreate(
-            name="Schirmling Saison-Trigger (Herbstregen)",
+            name="Schirmling Saison-Trigger (Regen + Abkühlung)",
             modality="template",
             driver="nature",
-            formula={"trigger": {"property_name": "rain_mm", "category": "pilz", "min_value": 35.0}},
+            formula={
+                "triggers": {
+                    "logic": "AND",
+                    "category": "pilz",
+                    "conditions": [
+                        {
+                            "entity_id": weather.id,
+                            "property_name": "rain_mm",
+                            "aggregation": "sum",
+                            "window_seconds": 14 * 86_400,
+                            "min_value": 35.0,
+                        },
+                        {
+                            "entity_id": weather.id,
+                            "property_name": "temperature_c",
+                            "aggregation": "mean",
+                            "window_seconds": 14 * 86_400,
+                            "min_value": 8.0,
+                            "max_value": 20.0,
+                        },
+                        {
+                            "entity_id": weather.id,
+                            "property_name": "temperature_c",
+                            "aggregation": "min",
+                            "window_seconds": 7 * 86_400,
+                            "min_value": 4.0,
+                        },
+                        {
+                            "entity_id": weather.id,
+                            "property_name": "temperature_c",
+                            "aggregation": "delta",
+                            "window_seconds": 14 * 86_400,
+                            "max_value": -3.0,
+                        },
+                    ],
+                }
+            },
             meta={"category": "pilz"},
         )
     )
 
+    repo.create_state(
+        StateCreate(
+            entity_id=weather.id,
+            modality="observed",
+            source="measured",
+            measurement_source="Wetterstation",
+            property_name="temperature_c",
+            label="Bodentemperatur -10 d (+17 °C)",
+            value_num=17.0,
+            value_sigma=0.5,
+            value_unit="°C",
+            time_ms=now_oct_ms - 10 * 86_400_000,
+        )
+    )
+    repo.create_state(
+        StateCreate(
+            entity_id=weather.id,
+            modality="observed",
+            source="measured",
+            measurement_source="Wetterstation",
+            property_name="rain_mm",
+            label="Vorregen -6 d (15 mm)",
+            value_num=15.0,
+            value_sigma=1.5,
+            value_unit="mm",
+            time_ms=now_oct_ms - 6 * 86_400_000,
+        )
+    )
+    repo.create_state(
+        StateCreate(
+            entity_id=weather.id,
+            modality="observed",
+            source="measured",
+            measurement_source="Wetterstation",
+            property_name="temperature_c",
+            label="Bodentemperatur -5 d (+15 °C)",
+            value_num=15.0,
+            value_sigma=0.5,
+            value_unit="°C",
+            time_ms=now_oct_ms - 5 * 86_400_000,
+        )
+    )
     temp_ok = repo.create_state(
         StateCreate(
             entity_id=weather.id,

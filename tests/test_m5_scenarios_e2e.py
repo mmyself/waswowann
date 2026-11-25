@@ -20,6 +20,7 @@ from metacore.seeds import (
     seed_koernerbrut,
     seed_riesenschirmling,
     seed_roboter_wasser,
+    seed_substrat_rezept,
 )
 
 
@@ -225,3 +226,86 @@ def test_e2e_igel_stachelbart_indoor_dedup_calibration_and_mcp_inspect(
     assert world["entity"]["id"] == ids["hericium_id"]
     assert len(world["history_observed"]) >= 6
     assert world["goal_evaluations"][0]["stage"] == 2
+
+
+def test_e2e_riesenschirmling_does_not_trigger_without_cooling(repo: MetaCoreRepository) -> None:
+    engine = MetaCoreEngine(repo)
+    ids = seed_riesenschirmling(repo, engine)
+
+    # If temperatures warmed back up instead of cooling down, 40 mm rain alone does NOT fire
+    engine.record_observation(
+        StateCreate(
+            entity_id=ids["weather_id"],
+            modality="observed",
+            source="measured",
+            measurement_source="Wetterstation",
+            property_name="temperature_c",
+            label="Föhnwärme +18 °C",
+            value_num=18.0,
+            value_sigma=0.5,
+            value_unit="°C",
+            time_ms=1_795_050_000_000,
+        )
+    )
+    fb_rain = engine.record_observation(
+        StateCreate(
+            entity_id=ids["weather_id"],
+            modality="observed",
+            source="measured",
+            measurement_source="Wetterstation",
+            property_name="rain_mm",
+            label="Warmer Herbstregen 40 mm",
+            value_num=40.0,
+            value_sigma=2.0,
+            value_unit="mm",
+            time_ms=1_795_100_000_000,
+        )
+    )
+    assert ids["trigger_template_id"] not in fb_rain.triggered_template_ids
+
+
+def test_e2e_substrat_rezept_ratios_and_modifiers(repo: MetaCoreRepository) -> None:
+    engine = MetaCoreEngine(repo)
+    ids = seed_substrat_rezept(repo, engine)
+
+    total_pred = repo.get_state(ids["total_pred_id"])
+    assert total_pred is not None
+    assert total_pred.value_num == pytest.approx(1400.0)
+    assert total_pred.value_sigma == pytest.approx(math.sqrt(150.0))
+    assert engine.evaluate_goal(ids["goal_id"]).stage == 2
+
+    # Insufficient water (500 g vs 500 g sawdust -> ratio 1.0 < 1.35) breaks vorbedingung
+    fb_dry = engine.record_observation(
+        StateCreate(
+            entity_id=ids["water_ent_id"],
+            modality="observed",
+            source="measured",
+            measurement_source="Messbecher",
+            property_name="water_mass",
+            label="Nur 500 g Wasser",
+            value_num=500.0,
+            value_sigma=10.0,
+            value_unit="g",
+            time_ms=1_795_000_600_000,
+        )
+    )
+    assert fb_dry.goal_evaluations[0].stage == 4
+    assert "vorbedingung" in fb_dry.goal_evaluations[0].broken_dimensions
+
+    # Topping up to 760 g restores ratio 1.52 -> Stage 2
+    fb_ok = engine.record_observation(
+        StateCreate(
+            entity_id=ids["water_ent_id"],
+            modality="observed",
+            source="measured",
+            measurement_source="Messbecher",
+            property_name="water_mass",
+            label="Wasser 760 g",
+            value_num=760.0,
+            value_sigma=10.0,
+            value_unit="g",
+            time_ms=1_795_001_200_000,
+        )
+    )
+    assert fb_ok.goal_evaluations[0].stage == 2
+    assert fb_ok.goal_evaluations[0].status == "on_track"

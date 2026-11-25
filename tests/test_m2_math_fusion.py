@@ -9,15 +9,19 @@ import pytest
 from metacore.math_fusion import (
     GaussianValue,
     GeoPoint,
+    aggregate_series,
     calibrate_parameter,
     combine_goal_probability,
+    compute_modifier_factor,
     fuse_1d,
     fuse_locations,
     generalize_habitat,
     geo_distance_meters,
     probability_in_bounds,
     probability_within_radius,
+    propagate_linear_combination,
     propagate_product,
+    propagate_ratio,
     propagate_split,
     propagate_sum,
 )
@@ -143,3 +147,63 @@ def test_goal_probabilities_1d_2d_and_combined() -> None:
 
     combined = combine_goal_probability([0.9, 0.8], path_success_prob=0.85)
     assert combined == pytest.approx(0.612)
+
+
+def test_linear_combination_ratio_series_and_modifiers() -> None:
+    terms = [
+        (GaussianValue(500.0, 5.0, source="measured"), GaussianValue(1.0, 0.0)),
+        (GaussianValue(750.0, 10.0, source="measured"), GaussianValue(1.0, 0.0)),
+        (GaussianValue(150.0, 5.0, source="measured"), GaussianValue(1.0, 0.0)),
+    ]
+    mix = propagate_linear_combination(terms)
+    assert mix.mean == pytest.approx(1400.0)
+    assert mix.sigma == pytest.approx(math.sqrt(25.0 + 100.0 + 25.0))
+    assert mix.source == "derived"
+
+    # Ratio propagation A / B
+    ratio = propagate_ratio(
+        GaussianValue(750.0, 10.0, source="measured"),
+        GaussianValue(500.0, 5.0, source="measured"),
+    )
+    assert ratio.mean == pytest.approx(1.5)
+    expected_ratio_sigma = math.hypot(10.0 / 500.0, 750.0 * 5.0 / (500.0**2))
+    assert ratio.sigma == pytest.approx(expected_ratio_sigma)
+
+    with pytest.raises(ValueError):
+        propagate_ratio(GaussianValue(10.0, 1.0), GaussianValue(0.0, 1.0))
+
+    # Time-series aggregations
+    series = [
+        GaussianValue(17.0, 0.5, source="measured"),
+        GaussianValue(15.0, 0.5, source="measured"),
+        GaussianValue(11.0, 0.5, source="measured"),
+    ]
+    assert aggregate_series(series, "latest").mean == pytest.approx(11.0)
+    assert aggregate_series(series, "min").mean == pytest.approx(11.0)
+    assert aggregate_series(series, "max").mean == pytest.approx(17.0)
+    assert aggregate_series(series, "sum").mean == pytest.approx(43.0)
+    assert aggregate_series(series, "mean").mean == pytest.approx(43.0 / 3.0)
+    delta = aggregate_series(series, "delta")
+    assert delta.mean == pytest.approx(-6.0)
+    assert delta.sigma == pytest.approx(math.hypot(0.5, 0.5))
+
+    # Modifier factors: optimal corridor vs cool penalty
+    opt = compute_modifier_factor(
+        GaussianValue(21.0, 0.5),
+        optimal_min=18.0,
+        optimal_max=24.0,
+        falloff_per_unit=0.05,
+        min_factor=0.5,
+        sigma_penalty_per_unit=0.01,
+    )
+    assert opt.mean == pytest.approx(1.0)
+    cool = compute_modifier_factor(
+        GaussianValue(14.0, 0.5),
+        optimal_min=18.0,
+        optimal_max=24.0,
+        falloff_per_unit=0.05,
+        min_factor=0.5,
+        sigma_penalty_per_unit=0.01,
+    )
+    assert cool.mean == pytest.approx(0.8)
+    assert cool.sigma == pytest.approx(0.01 * 4.0 + 0.05 * 0.5)

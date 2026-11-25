@@ -475,3 +475,350 @@ def test_choice_or_switch_uses_conflict_and_abort_release(repo: MetaCoreReposito
     assert fb_abort.goal_evaluations[0].status == "cancelled"
     uses_edges = repo.list_edges(transformation_id=tx_deliver.id, role="uses")
     assert uses_edges[0].resource_released is True
+
+
+def test_multi_condition_windowed_triggers_and_or(repo: MetaCoreRepository) -> None:
+    engine = MetaCoreEngine(repo)
+    weather = repo.create_entity(EntityCreate(name="Wetterstation", kind="worldline", category="pilz"))
+    t0 = 1_795_000_000_000
+
+    tpl_and = repo.create_transformation(
+        TransformationCreate(
+            name="Pilz Multi-Trigger (Regen + Abkühlung)",
+            modality="template",
+            driver="nature",
+            formula={
+                "triggers": {
+                    "logic": "AND",
+                    "category": "pilz",
+                    "conditions": [
+                        {
+                            "entity_id": weather.id,
+                            "property_name": "rain_mm",
+                            "aggregation": "sum",
+                            "window_seconds": 14 * 86_400,
+                            "min_value": 35.0,
+                        },
+                        {
+                            "entity_id": weather.id,
+                            "property_name": "temperature_c",
+                            "aggregation": "mean",
+                            "window_seconds": 14 * 86_400,
+                            "min_value": 8.0,
+                            "max_value": 20.0,
+                        },
+                        {
+                            "entity_id": weather.id,
+                            "property_name": "temperature_c",
+                            "aggregation": "delta",
+                            "window_seconds": 14 * 86_400,
+                            "max_value": -3.0,
+                        },
+                    ],
+                }
+            },
+        )
+    )
+    tpl_or = repo.create_transformation(
+        TransformationCreate(
+            name="Pilz OR-Trigger (Starkregen oder hohe Luftfeuchte)",
+            modality="template",
+            driver="nature",
+            formula={
+                "triggers": {
+                    "logic": "OR",
+                    "category": "pilz",
+                    "conditions": [
+                        {"entity_id": weather.id, "property_name": "rain_mm", "min_value": 50.0},
+                        {"entity_id": weather.id, "property_name": "humidity_pct", "min_value": 90.0},
+                    ],
+                }
+            },
+        )
+    )
+
+    # Warm spell without cooling (18 -> 19 °C): AND trigger must NOT fire even with 40 mm rain
+    repo.create_state(
+        StateCreate(
+            entity_id=weather.id,
+            modality="observed",
+            source="measured",
+            property_name="temperature_c",
+            label="Temp -10 d (18 °C)",
+            value_num=18.0,
+            value_sigma=0.3,
+            value_unit="°C",
+            time_ms=t0 - 10 * 86_400_000,
+        )
+    )
+    repo.create_state(
+        StateCreate(
+            entity_id=weather.id,
+            modality="observed",
+            source="measured",
+            property_name="temperature_c",
+            label="Temp -1 d (19 °C)",
+            value_num=19.0,
+            value_sigma=0.3,
+            value_unit="°C",
+            time_ms=t0 - 86_400_000,
+        )
+    )
+    fb_no = engine.record_observation(
+        StateCreate(
+            entity_id=weather.id,
+            modality="observed",
+            source="measured",
+            property_name="rain_mm",
+            label="Regen ohne Kältereiz (40 mm)",
+            value_num=40.0,
+            value_sigma=1.0,
+            value_unit="mm",
+            time_ms=t0,
+        )
+    )
+    assert tpl_and.id not in fb_no.triggered_template_ids
+    assert tpl_or.id not in fb_no.triggered_template_ids
+
+    # Cooling arrives (-7 °C drop vs 18 °C baseline) + OR humidity >= 90%
+    repo.create_state(
+        StateCreate(
+            entity_id=weather.id,
+            modality="observed",
+            source="measured",
+            property_name="temperature_c",
+            label="Abkühlung (11 °C)",
+            value_num=11.0,
+            value_sigma=0.3,
+            value_unit="°C",
+            time_ms=t0 + 86_400_000,
+        )
+    )
+    fb_and = engine.record_observation(
+        StateCreate(
+            entity_id=weather.id,
+            modality="observed",
+            source="measured",
+            property_name="rain_mm",
+            label="Folgeregen 10 mm",
+            value_num=10.0,
+            value_sigma=1.0,
+            value_unit="mm",
+            time_ms=t0 + 2 * 86_400_000,
+        )
+    )
+    assert tpl_and.id in fb_and.triggered_template_ids
+
+    fb_or = engine.record_observation(
+        StateCreate(
+            entity_id=weather.id,
+            modality="observed",
+            source="measured",
+            property_name="humidity_pct",
+            label="Luftfeuchte 94 %",
+            value_num=94.0,
+            value_sigma=1.0,
+            value_unit="%",
+            time_ms=t0 + 2 * 86_400_000,
+        )
+    )
+    assert tpl_or.id in fb_or.triggered_template_ids
+
+
+def test_recipe_mix_weighted_sum_limiting_factor_ratios_and_modifiers(
+    repo: MetaCoreRepository,
+) -> None:
+    engine = MetaCoreEngine(repo)
+    kitchen = repo.create_entity(EntityCreate(name="Teigschüssel", kind="worldline", category="rezept"))
+    t0 = 1_795_000_000_000
+
+    # 1. Weighted sum + ratio guard + output & duration modifiers at cool temperature (14 °C)
+    flour = repo.create_state(
+        StateCreate(
+            entity_id=kitchen.id,
+            modality="observed",
+            source="measured",
+            property_name="flour_mass",
+            label="Mehl 500 g",
+            value_num=500.0,
+            value_sigma=5.0,
+            value_unit="g",
+            time_ms=t0,
+        )
+    )
+    water = repo.create_state(
+        StateCreate(
+            entity_id=kitchen.id,
+            modality="observed",
+            source="measured",
+            property_name="water_mass",
+            label="Wasser 300 g",
+            value_num=300.0,
+            value_sigma=5.0,
+            value_unit="g",
+            time_ms=t0,
+        )
+    )
+    temp = repo.create_state(
+        StateCreate(
+            entity_id=kitchen.id,
+            modality="observed",
+            source="measured",
+            property_name="temperature_c",
+            label="Raumtemperatur 14 °C",
+            value_num=14.0,
+            value_sigma=0.5,
+            value_unit="°C",
+            time_ms=t0,
+        )
+    )
+    tpl_mix = repo.create_transformation(
+        TransformationCreate(
+            name="Brotteig ansetzen",
+            modality="template",
+            driver="actor",
+            duration_seconds=3600.0,
+            duration_sigma_seconds=120.0,
+            duration_source="ai_prior",
+            formula={
+                "kind": "recipe_mix",
+                "mode": "weighted_sum",
+                "output_property": "dough_mass",
+                "output_unit": "g",
+                "ingredients": [
+                    {"property_name": "flour_mass", "weight": 1.0, "role": "consumes"},
+                    {"property_name": "water_mass", "weight": 1.0, "role": "consumes"},
+                ],
+                "input_roles": {"temperature_c": "triggers"},
+                "ratio_guards": [
+                    {
+                        "kind": "ratio",
+                        "numerator_entity_id": kitchen.id,
+                        "numerator_property": "water_mass",
+                        "denominator_entity_id": kitchen.id,
+                        "denominator_property": "flour_mass",
+                        "min_ratio": 0.55,
+                        "max_ratio": 0.70,
+                    }
+                ],
+                "modifiers": [
+                    {
+                        "entity_id": kitchen.id,
+                        "property_name": "temperature_c",
+                        "applies_to": "output",
+                        "optimal_min": 18.0,
+                        "optimal_max": 24.0,
+                        "falloff_per_unit": 0.05,
+                        "min_factor": 0.5,
+                    },
+                    {
+                        "entity_id": kitchen.id,
+                        "property_name": "temperature_c",
+                        "applies_to": "duration",
+                        "optimal_min": 18.0,
+                        "optimal_max": 24.0,
+                        "falloff_per_unit": 0.05,
+                        "min_factor": 0.5,
+                    },
+                ],
+            },
+        )
+    )
+    fb_mix = engine.instantiate_template(
+        tpl_mix.id,
+        input_state_ids=[flour.id, water.id, temp.id],
+        target_entity_id=kitchen.id,
+        start_time_ms=t0,
+    )
+    pred_mix = repo.get_state(fb_mix.created_state_ids[0])
+    assert pred_mix is not None
+    # Raw sum = 800 g; temp=14 °C (4 units below 18 °C * 0.05 = 0.20 falloff -> factor 0.80) -> 640 g
+    assert pred_mix.value_num == pytest.approx(640.0)
+    # Duration scaled by 1 / 0.80 = 4500 s -> t0 + 4_500_000 ms
+    assert pred_mix.time_ms == t0 + 4_500_000
+
+    goal_dough = repo.create_state(
+        StateCreate(
+            entity_id=kitchen.id,
+            modality="desired",
+            source="user_goal",
+            property_name="dough_mass",
+            label="Teig >= 500 g mit passender Hydration",
+            target_min=500.0,
+        )
+    )
+    assert engine.evaluate_goal(goal_dough.id).stage == 2
+
+    # Dry hydration ratio (200 / 500 = 0.40 < 0.55) breaks vorbedingung -> Stage 4
+    fb_dry = engine.record_observation(
+        StateCreate(
+            entity_id=kitchen.id,
+            modality="observed",
+            source="measured",
+            property_name="water_mass",
+            label="Nur 200 g Wasser",
+            value_num=200.0,
+            value_sigma=5.0,
+            value_unit="g",
+            time_ms=t0 + 1000,
+        )
+    )
+    assert fb_dry.goal_evaluations[0].stage == 4
+    assert "vorbedingung" in fb_dry.goal_evaluations[0].broken_dimensions
+
+    # 2. Limiting-factor mode detects bottleneck ingredient
+    sugar = repo.create_state(
+        StateCreate(
+            entity_id=kitchen.id,
+            modality="observed",
+            source="measured",
+            property_name="sugar_mass",
+            label="Zucker 100 g",
+            value_num=100.0,
+            value_sigma=2.0,
+            value_unit="g",
+            time_ms=t0,
+        )
+    )
+    butter = repo.create_state(
+        StateCreate(
+            entity_id=kitchen.id,
+            modality="observed",
+            source="measured",
+            property_name="butter_mass",
+            label="Butter 200 g",
+            value_num=200.0,
+            value_sigma=5.0,
+            value_unit="g",
+            time_ms=t0,
+        )
+    )
+    tpl_limit = repo.create_transformation(
+        TransformationCreate(
+            name="Mürbeteig-Portionen (Limitierung)",
+            modality="template",
+            driver="actor",
+            formula={
+                "kind": "recipe_mix",
+                "mode": "limiting_factor",
+                "output_property": "portions",
+                "output_unit": "stk",
+                "unit_output_mean": 4.0,
+                "ingredients": [
+                    {"property_name": "flour_mass", "per_unit": 200.0, "role": "consumes"},  # 2.5 units
+                    {"property_name": "butter_mass", "per_unit": 100.0, "role": "consumes"},  # 2.0 units (Engpass)
+                    {"property_name": "sugar_mass", "per_unit": 25.0, "role": "consumes"},  # 4.0 units
+                ],
+            },
+        )
+    )
+    fb_limit = engine.instantiate_template(
+        tpl_limit.id,
+        input_state_ids=[flour.id, butter.id, sugar.id],
+        target_entity_id=kitchen.id,
+        start_time_ms=t0,
+    )
+    pred_limit = repo.get_state(fb_limit.created_state_ids[0])
+    assert pred_limit is not None
+    assert pred_limit.value_num == pytest.approx(8.0)
+    assert pred_limit.meta["limiting_ingredient"] == "butter_mass"

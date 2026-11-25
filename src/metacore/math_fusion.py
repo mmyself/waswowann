@@ -5,8 +5,11 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from metacore.models import ValueSource
+
+SeriesAggregation = Literal["latest", "sum", "mean", "min", "max", "delta"]
 
 EARTH_RADIUS_M = 6_371_008.8
 
@@ -361,3 +364,116 @@ def combine_goal_probability(
             raise ValueError("dimension_probs müssen in [0, 1] liegen")
         prob *= p
     return max(0.0, min(1.0, prob))
+
+
+def propagate_linear_combination(
+    terms: Sequence[tuple[GaussianValue, GaussianValue]],
+) -> GaussianValue:
+    """Propagate mean and RSS sigma for Y = sum_i c_i * X_i over uncertain inputs/weights."""
+    if not terms:
+        raise ValueError("terms darf nicht leer sein")
+    mean = sum(weight.mean * value.mean for value, weight in terms)
+    sigma = math.sqrt(
+        sum(
+            (weight.mean * value.sigma) ** 2 + (value.mean * weight.sigma) ** 2
+            for value, weight in terms
+        )
+    )
+    source: ValueSource = (
+        "ai_prior"
+        if any("ai_prior" in (value.source, weight.source) for value, weight in terms)
+        else "derived"
+    )
+    return GaussianValue(mean=mean, sigma=sigma, source=source)
+
+
+def propagate_ratio(numerator: GaussianValue, denominator: GaussianValue) -> GaussianValue:
+    """Propagate Gaussian uncertainty for ratio R = numerator / denominator."""
+    if abs(denominator.mean) < 1e-12:
+        raise ValueError("denominator.mean darf nicht 0 sein")
+    mean = numerator.mean / denominator.mean
+    sigma = math.hypot(
+        numerator.sigma / abs(denominator.mean),
+        abs(numerator.mean) * denominator.sigma / (denominator.mean**2),
+    )
+    source: ValueSource = (
+        "ai_prior" if "ai_prior" in (numerator.source, denominator.source) else "derived"
+    )
+    return GaussianValue(mean=mean, sigma=sigma, source=source)
+
+
+def aggregate_series(
+    samples: Sequence[GaussianValue], aggregation: SeriesAggregation = "latest"
+) -> GaussianValue:
+    """Aggregate an ordered time series of Gaussian samples into a single summary value."""
+    if not samples:
+        raise ValueError("samples darf nicht leer sein")
+    if aggregation == "latest":
+        return samples[-1]
+    if aggregation == "min":
+        return min(samples, key=lambda s: s.mean)
+    if aggregation == "max":
+        return max(samples, key=lambda s: s.mean)
+
+    source: ValueSource = (
+        "ai_prior" if any(s.source == "ai_prior" for s in samples) else "derived"
+    )
+    if aggregation == "sum":
+        return GaussianValue(
+            mean=sum(s.mean for s in samples),
+            sigma=math.sqrt(sum(s.sigma**2 for s in samples)),
+            source=source,
+        )
+    if aggregation == "mean":
+        n = len(samples)
+        return GaussianValue(
+            mean=sum(s.mean for s in samples) / n,
+            sigma=math.sqrt(sum(s.sigma**2 for s in samples)) / n,
+            source=source,
+        )
+    if aggregation == "delta":
+        if len(samples) == 1:
+            return GaussianValue(mean=0.0, sigma=0.0, source=source)
+        first, last = samples[0], samples[-1]
+        return GaussianValue(
+            mean=last.mean - first.mean,
+            sigma=math.hypot(last.sigma, first.sigma),
+            source=source,
+        )
+    raise ValueError(f"Unbekannte Aggregation: {aggregation}")
+
+
+def compute_modifier_factor(
+    observed: GaussianValue,
+    *,
+    optimal_min: float,
+    optimal_max: float,
+    falloff_per_unit: float,
+    min_factor: float = 0.0,
+    sigma_penalty_per_unit: float = 0.0,
+) -> GaussianValue:
+    """Compute a [min_factor, 1.0] environmental scaling factor outside an optimal corridor."""
+    _require_finite(optimal_min, "optimal_min")
+    _require_finite(optimal_max, "optimal_max")
+    _require_finite(falloff_per_unit, "falloff_per_unit")
+    _require_finite(min_factor, "min_factor")
+    _require_finite(sigma_penalty_per_unit, "sigma_penalty_per_unit")
+    if optimal_min > optimal_max:
+        raise ValueError("optimal_min darf nicht größer als optimal_max sein")
+    if falloff_per_unit < 0.0:
+        raise ValueError("falloff_per_unit darf nicht negativ sein")
+    if not 0.0 <= min_factor <= 1.0:
+        raise ValueError("min_factor muss in [0, 1] liegen")
+    if sigma_penalty_per_unit < 0.0:
+        raise ValueError("sigma_penalty_per_unit darf nicht negativ sein")
+
+    if observed.mean < optimal_min:
+        dist = optimal_min - observed.mean
+    elif observed.mean > optimal_max:
+        dist = observed.mean - optimal_max
+    else:
+        dist = 0.0
+
+    factor = max(min_factor, 1.0 - falloff_per_unit * dist)
+    sigma = sigma_penalty_per_unit * dist + falloff_per_unit * observed.sigma
+    return GaussianValue(mean=factor, sigma=sigma, source="derived")

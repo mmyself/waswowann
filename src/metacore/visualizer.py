@@ -21,6 +21,7 @@ from metacore.seeds import (
     seed_koernerbrut,
     seed_riesenschirmling,
     seed_roboter_wasser,
+    seed_substrat_rezept,
 )
 
 
@@ -233,8 +234,11 @@ def _run_riesenschirmling_scenario() -> dict[str, Any]:
         phase_1 = export_graph_snapshot(
             repo,
             engine,
-            title="Regen 40 mm (Stufe-1-Trigger)",
-            subtitle="Saison-Trigger ab 35 mm Niederschlag feuert und aktiviert die Fruchtungs-Vorhersage.",
+            title="Regen 40 mm (Multi-Condition-Trigger)",
+            subtitle=(
+                "14-Tage-Regensumme (55 mm ≥ 35 mm) plus Temperaturabfall (-6 °C) "
+                "und Frostfreiheit lösen den Saison-Trigger aus."
+            ),
             last_feedback=fb_rain,
         )
 
@@ -414,12 +418,82 @@ def _run_igel_stachelbart_scenario() -> dict[str, Any]:
     }
 
 
+def _run_substrat_rezept_scenario() -> dict[str, Any]:
+    with _temp_engine("substrat_rezept.sqlite3") as (repo, engine):
+        t0 = 1_795_000_000_000
+        ids = seed_substrat_rezept(repo, engine, start_ms=t0)
+        phase_0 = export_graph_snapshot(
+            repo,
+            engine,
+            title="Optimale Mischung (1400 ± 12,2 g)",
+            subtitle=(
+                "500 g Sägespäne + 750 g Wasser + 150 g Brut bei 21 °C; "
+                "Wasser:Späne = 1,50 im Korridor [1,35; 1,65] (Stufe 2)."
+            ),
+        )
+
+        fb_dry = engine.record_observation(
+            StateCreate(
+                entity_id=ids["water_ent_id"],
+                modality="observed",
+                source="measured",
+                measurement_source="Messbecher",
+                property_name="water_mass",
+                label="Nur 500 g Wasser abgemessen",
+                value_num=500.0,
+                value_sigma=10.0,
+                value_unit="g",
+                time_ms=t0 + 600_000,
+            )
+        )
+        phase_1 = export_graph_snapshot(
+            repo,
+            engine,
+            title="Zu trocken: Wasser 500 g (Stufe 4)",
+            subtitle="Verhältnis Wasser:Späne fällt auf 1,00 (< 1,35) und bricht die Vorbedingung.",
+            last_feedback=fb_dry,
+        )
+
+        fb_ok = engine.record_observation(
+            StateCreate(
+                entity_id=ids["water_ent_id"],
+                modality="observed",
+                source="measured",
+                measurement_source="Messbecher",
+                property_name="water_mass",
+                label="Wasser auf 760 g aufgefüllt",
+                value_num=760.0,
+                value_sigma=10.0,
+                value_unit="g",
+                time_ms=t0 + 1_200_000,
+            )
+        )
+        phase_2 = export_graph_snapshot(
+            repo,
+            engine,
+            title="Aufgefüllt: Wasser 760 g (Stufe 2)",
+            subtitle="Verhältnis Wasser:Späne steigt auf 1,52 — Rezept wieder im grünen Bereich.",
+            last_feedback=fb_ok,
+        )
+
+    return {
+        "id": "substrat_rezept",
+        "title": "5. Substrat-Rezept (Mengenrelation)",
+        "description": (
+            "Multi-Input-Rezept (Späne + Wasser + Körnerbrut) mit Verhältnis-Guard "
+            "und Temperatur-Modulator."
+        ),
+        "phases": [phase_0, phase_1, phase_2],
+    }
+
+
 def build_demo_scenarios_payload() -> dict[str, Any]:
-    """Execute all 4 reference scenarios against real temp SQLite DBs and export snapshots."""
+    """Execute all 5 reference scenarios against real temp SQLite DBs and export snapshots."""
     koernerbrut = _run_koernerbrut_scenario()
     riesenschirmling = _run_riesenschirmling_scenario()
     roboter_wasser = _run_roboter_wasser_scenario()
     igel_stachelbart = _run_igel_stachelbart_scenario()
+    substrat_rezept = _run_substrat_rezept_scenario()
     return {
         "title": "WoWannWas · Zukunftsgraph (Live MetaCore-Engine)",
         "generated_by": "metacore.visualizer",
@@ -433,12 +507,14 @@ def build_demo_scenarios_payload() -> dict[str, Any]:
             "riesenschirmling",
             "roboter_wasser",
             "igel_stachelbart",
+            "substrat_rezept",
         ],
         "scenarios": {
             "koernerbrut": koernerbrut,
             "riesenschirmling": riesenschirmling,
             "roboter_wasser": roboter_wasser,
             "igel_stachelbart": igel_stachelbart,
+            "substrat_rezept": substrat_rezept,
         },
     }
 
