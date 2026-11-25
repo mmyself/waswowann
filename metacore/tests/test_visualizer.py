@@ -91,9 +91,9 @@ def test_build_demo_scenarios_payload_real_engine_metrics() -> None:
     assert rw[3]["goal_evaluations"][0]["status"] == "cancelled"
     assert rw[3]["uses_conflicts"] == []
 
-    # 4. Igel-Stachelbart climate phases (16 °C -> 18 °C, 80 ± 10 % rF), deduplication & calibration
+    # 4. Igel-Stachelbart climate phases (16 °C -> 18 °C, 80 ± 10 % rF), deduplication, calibration & Flush 2 time-window escalation
     ig = scenarios["igel_stachelbart"]["phases"]
-    assert len(ig) == 3
+    assert len(ig) == 4
     assert len(ig[0]["entity_geo_fusions"]) == 1
     assert ig[0]["entity_geo_fusions"][0]["observation_count"] == 2
     assert ig[0]["entity_geo_fusions"][0]["sigma_meters"] == pytest.approx(12.0)
@@ -116,6 +116,14 @@ def test_build_demo_scenarios_payload_real_engine_metrics() -> None:
     assert ig[2]["templates"][0]["duration_source"] == "measured"
     dur = ig[2]["templates"][0]["duration_seconds"]
     assert dur is not None and 8.5 * 86_400 <= dur <= 9.2 * 86_400
+
+    # Phase 3: Flush 2 strict time window (Tag 5-7) breaks 'wann' while 'wie_viel' passes (~96%)
+    flush2_eval = next(g for g in ig[3]["goal_evaluations"] if g["property_name"] == "harvest_flush2")
+    assert flush2_eval["stage"] == 4
+    assert flush2_eval["status"] == "broken"
+    assert flush2_eval["broken_dimensions"] == ["wann"]
+    assert flush2_eval["dimension_probs"]["wie_viel"] > 0.9
+    assert flush2_eval["dimension_probs"]["wann"] < 0.05
 
     # 5. Substrat-Rezept multi-input recipe_mix + ratio guard transitions
     sub = scenarios["substrat_rezept"]["phases"]
@@ -158,6 +166,8 @@ def test_render_html_valid_and_js_syntax_passes_node_check(tmp_path: Path) -> No
     assert "Substrat-Rezept" in html
     assert "Pilz-Lebenszyklus" in html
     assert "Unterschritte" in html
+    assert "Ziel live testen (Menge &amp; Zeitpunkt)" in html
+    assert "Ziel-Zeitfenster" in html
 
     scripts = re.findall(r"<script>([\s\S]*?)</script>", html)
     assert len(scripts) == 1

@@ -14,7 +14,7 @@ from metacore.config import Settings
 from metacore.db import migrate
 from metacore.engine import MetaCoreEngine, MutationFeedback
 from metacore.math_fusion import GeoPoint, fuse_locations
-from metacore.models import StateCreate, Transformation
+from metacore.models import StateCreate, Transformation, TransformationCreate
 from metacore.repository import MetaCoreRepository
 from metacore.seeds import (
     seed_igel_stachelbart,
@@ -470,15 +470,92 @@ def _run_igel_stachelbart_scenario() -> dict[str, Any]:
             last_feedback=fb_harvest,
         )
 
+        cal_tpl = repo.get_transformation(ids["template_id"])
+        assert cal_tpl is not None
+        t2 = 1_795_538_193_000
+        pins_2 = repo.create_state(
+            StateCreate(
+                entity_id=ids["hericium_id"],
+                modality="observed",
+                source="measured",
+                measurement_source="Handy_Indoor",
+                property_name="harvest_flush2",
+                label="2. Schub: Neue Primordien (25 g)",
+                value_num=25.0,
+                value_sigma=4.0,
+                value_unit="g",
+                location_label="Indoor Fruchtungsbox",
+                time_ms=t2,
+                sigma_seconds=60.0,
+            )
+        )
+        tpl_flush2 = repo.create_transformation(
+            TransformationCreate(
+                name="Igel-Stachelbart 2. Schub",
+                modality="template",
+                driver="nature",
+                duration_seconds=cal_tpl.duration_seconds,
+                duration_sigma_seconds=cal_tpl.duration_sigma_seconds,
+                duration_source=cal_tpl.duration_source,
+                formula={
+                    "kind": "duration_step",
+                    "output_property": "harvest_flush2",
+                    "output_unit": "g",
+                    "output_value": 280.0,
+                    "output_sigma": 45.0,
+                    "location_label": "Indoor Fruchtungsbox",
+                    "input_roles": {
+                        "harvest_flush2": "consumes",
+                        "temperature_c": "triggers",
+                        "humidity_pct": "triggers",
+                    },
+                    "guard_logic": "AND",
+                    "guards": list(cal_tpl.formula.get("guards", [])),
+                    "modifiers": list(cal_tpl.formula.get("modifiers", [])),
+                },
+                meta={"category": "Pilz", "species": "Hericium erinaceus"},
+            )
+        )
+        fb_flush2 = engine.instantiate_template(
+            tpl_flush2.id,
+            input_state_ids=[pins_2.id, ids["temp_day0_id"], ids["hum_day0_id"]],
+            target_entity_id=ids["hericium_id"],
+            start_time_ms=t2,
+        )
+        repo.create_state(
+            StateCreate(
+                entity_id=ids["hericium_id"],
+                modality="desired",
+                source="user_goal",
+                property_name="harvest_flush2",
+                label="2. Schub Ziel (≥ 200 g · Tag 5–7)",
+                value_unit="g",
+                location_label="Indoor Fruchtungsbox",
+                target_min=200.0,
+                target_earliest_ms=t2 + 5 * 86_400_000,
+                target_latest_ms=t2 + 7 * 86_400_000,
+            )
+        )
+        phase_3 = export_graph_snapshot(
+            repo,
+            engine,
+            title="2. Schub: Strenges Zeitfenster Tag 5–7 (Stufe 4)",
+            subtitle=(
+                "Menge (≥ 200 g) passt (~96 %), aber kalibrierte Dauer (~8,9 d) sprengt Tag 5–7 — "
+                "Plan, Prognose & Ziel werden wegen 'wann' rot."
+            ),
+            last_feedback=fb_flush2,
+        )
+
     return {
         "id": "igel_stachelbart",
         "title": "4. Igel-Stachelbart (Reale WasWoWann-Daten)",
         "description": (
             "Reale Timelapse-Spanne aus WasWoWann plus Klima-Tracking der Indoor Fruchtungsbox "
-            "(16 °C → 18 °C, 80 ± 10 % rF), Handy_Indoor-Deduplizierung (σ = 12 m) und "
-            "automatische Dauer-Kalibrierung nach 8,92 Tagen."
+            "(16 °C → 18 °C, 80 ± 10 % rF), Handy_Indoor-Deduplizierung (σ = 12 m), "
+            "Dauer-Kalibrierung (8,92 d) sowie Zeitfenster-Eskalation (Menge + Wann)."
         ),
-        "phases": [phase_0, phase_1, phase_2],
+        "phases": [phase_0, phase_1, phase_2, phase_3],
     }
 
 
@@ -951,6 +1028,23 @@ svg { display: block; width: 100%; height: auto; min-width: 780px; }
 .tab-btn.active { background: #0f172a; color: #fff; border-color: #0f172a; }
 .node-g { cursor: pointer; }
 .node-g:hover rect.node-card { filter: brightness(0.97); }
+.goal-tuner {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #cbd5e1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.76rem;
+}
+.tuner-row {
+  display: grid;
+  grid-template-columns: 92px 1fr 78px;
+  align-items: center;
+  gap: 6px;
+}
+.tuner-row input[type="range"] { width: 100%; accent-color: #2563eb; cursor: pointer; }
+.tuner-check { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: #334155; }
 """
 
 _HTML_SCRIPT = r"""
@@ -973,6 +1067,42 @@ _HTML_SCRIPT = r"""
     if (ms === null || ms === undefined) return "—";
     const d = new Date(Number(ms));
     return d.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+  };
+
+  const fmtShortDate = (ms) => {
+    if (ms === null || ms === undefined) return "—";
+    const d = new Date(Number(ms));
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    return `${dd}.${mm}.`;
+  };
+
+  const describeGoalTime = (st) => {
+    const hasE = st.target_earliest_ms !== null && st.target_earliest_ms !== undefined;
+    const hasL = st.target_latest_ms !== null && st.target_latest_ms !== undefined;
+    if (hasE && hasL) return `${fmtShortDate(st.target_earliest_ms)}–${fmtShortDate(st.target_latest_ms)}`;
+    if (hasL) return `bis ${fmtShortDate(st.target_latest_ms)}`;
+    if (hasE) return `ab ${fmtShortDate(st.target_earliest_ms)}`;
+    return "";
+  };
+
+  const erf = (x) => {
+    const sign = x >= 0 ? 1 : -1;
+    const ax = Math.abs(x);
+    const t = 1.0 / (1.0 + 0.3275911 * ax);
+    const y = 1.0 - (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t) * Math.exp(-ax * ax);
+    return sign * y;
+  };
+
+  const normalCdf = (x, mean, sigma) => {
+    if (sigma <= 0) return x >= mean ? 1.0 : 0.0;
+    return 0.5 * (1.0 + erf((x - mean) / (sigma * Math.SQRT2)));
+  };
+
+  const probInBounds = (mean, sigma, lo, hi) => {
+    const u = hi === null || hi === undefined ? 1.0 : normalCdf(hi, mean, sigma);
+    const l = lo === null || lo === undefined ? 0.0 : normalCdf(lo, mean, sigma);
+    return Math.max(0.0, Math.min(1.0, u - l));
   };
 
   const fmtDuration = (sec, sigmaSec) => {
@@ -1002,9 +1132,92 @@ _HTML_SCRIPT = r"""
   let activeTableTab = "states";
   let selectedItem = null; // { kind: "state" | "tx", id: string }
   const expandedParentIds = new Set();
+  const goalOverrides = {}; // key: `${scenarioId}:${phaseIdx}:${goalId}` -> { target_min?, target_earliest_ms?, target_latest_ms? }
 
+  const overrideKey = (goalId) => `${activeScenarioId}:${activePhaseIdx}:${goalId}`;
   const getScenario = () => PAYLOAD.scenarios[activeScenarioId];
-  const getSnap = () => getScenario().phases[activePhaseIdx];
+  const getRawSnap = () => getScenario().phases[activePhaseIdx];
+
+  function scenarioAnchorMs(snap) {
+    const obsTimes = (snap.states || [])
+      .filter((s) => s.modality === "observed" && s.time_ms !== null && s.time_ms !== undefined)
+      .map((s) => Number(s.time_ms));
+    return obsTimes.length ? Math.max(...obsTimes) : Date.now();
+  }
+
+  function applyGoalOverrides(rawSnap) {
+    const prefix = `${activeScenarioId}:${activePhaseIdx}:`;
+    const activeKeys = Object.keys(goalOverrides).filter((k) => k.startsWith(prefix));
+    if (activeKeys.length === 0) return rawSnap;
+
+    const snap = JSON.parse(JSON.stringify(rawSnap));
+    const stateMap = Object.fromEntries((snap.states || []).map((s) => [s.id, s]));
+
+    for (const ev of snap.goal_evaluations || []) {
+      const ov = goalOverrides[overrideKey(ev.goal_id)];
+      if (!ov) continue;
+      const goalSt = stateMap[ev.goal_id];
+      if (!goalSt || goalSt.modality !== "desired") continue;
+      if (Object.prototype.hasOwnProperty.call(ov, "target_min")) goalSt.target_min = ov.target_min;
+      if (Object.prototype.hasOwnProperty.call(ov, "target_earliest_ms")) goalSt.target_earliest_ms = ov.target_earliest_ms;
+      if (Object.prototype.hasOwnProperty.call(ov, "target_latest_ms")) goalSt.target_latest_ms = ov.target_latest_ms;
+
+      const pred = ev.predicted_state_id ? stateMap[ev.predicted_state_id] : null;
+      const dims = Object.assign({}, ev.dimension_probs || {});
+      const broken = [];
+      const failTh = goalSt.threshold_fail ?? 0.2;
+      const okTh = goalSt.threshold_ok ?? 0.8;
+
+      if (goalSt.target_min !== null || goalSt.target_max !== null) {
+        const pQty = (pred && pred.value_num !== null && pred.value_num !== undefined)
+          ? probInBounds(Number(pred.value_num), Number(pred.value_sigma || 0), goalSt.target_min, goalSt.target_max)
+          : 0.0;
+        dims.wie_viel = pQty;
+        if (pQty < failTh) broken.push("wie_viel");
+      }
+      if (goalSt.target_earliest_ms !== null || goalSt.target_latest_ms !== null) {
+        const pTime = (pred && pred.time_ms !== null && pred.time_ms !== undefined)
+          ? probInBounds(Number(pred.time_ms), Number(pred.sigma_seconds || 0) * 1000.0, goalSt.target_earliest_ms, goalSt.target_latest_ms)
+          : 0.0;
+        dims.wann = pTime;
+        if (pTime < failTh) broken.push("wann");
+      } else {
+        delete dims.wann;
+      }
+      if ((dims.wo ?? 1.0) < failTh) broken.push("wo");
+      if ((dims.vorbedingung ?? 1.0) < failTh) broken.push("vorbedingung");
+
+      let combined = 1.0;
+      for (const v of Object.values(dims)) combined *= Number(v);
+      combined = Math.max(0.0, Math.min(1.0, combined));
+
+      ev.dimension_probs = dims;
+      ev.goal_probability = combined;
+      if (combined >= okTh) {
+        ev.stage = 2;
+        ev.status = "on_track";
+        ev.broken_dimensions = [];
+        ev.summary = `Stufe 2 (Live-Test): Zielwahrscheinlichkeit ${fmtPct(combined)} >= ${fmtPct(okTh)}.`;
+      } else if (combined >= failTh) {
+        ev.stage = 3;
+        ev.status = "at_risk";
+        ev.broken_dimensions = broken;
+        ev.summary = `Stufe 3 (Live-Test): Zielwahrscheinlichkeit ${fmtPct(combined)} unter ${fmtPct(okTh)}.`;
+      } else {
+        ev.stage = 4;
+        ev.status = "broken";
+        if (!broken.length && Object.keys(dims).length) {
+          const lowest = Object.entries(dims).sort((a, b) => a[1] - b[1])[0][0];
+          broken.push(lowest);
+        }
+        ev.broken_dimensions = broken;
+        ev.summary = `Stufe 4 (Live-Test): Zielwahrscheinlichkeit ${fmtPct(combined)} < ${fmtPct(failTh)}; gebrochen: ${broken.join(", ")}.`;
+      }
+    }
+    return snap;
+  }
+
+  const getSnap = () => applyGoalOverrides(getRawSnap());
 
   function getChildCountByParent(snap) {
     const counts = {};
@@ -1164,6 +1377,8 @@ _HTML_SCRIPT = r"""
     if (st.target_max !== null && st.target_max !== undefined) bounds.push(`≤ ${fmtNum(st.target_max)} ${st.value_unit || ""}`.trim());
     if (st.target_value_text) bounds.push(`= ${st.target_value_text}`);
     if (st.target_radius_meters !== null && st.target_radius_meters !== undefined) bounds.push(`r ≤ ${fmtNum(st.target_radius_meters, 0)} m`);
+    const timeWin = describeGoalTime(st);
+    if (timeWin) bounds.push(timeWin);
     return bounds.join(" · ") || "—";
   }
 
@@ -1528,20 +1743,64 @@ _HTML_SCRIPT = r"""
             ).join("")}
           </div>`
         : "";
+      const predState = g.predicted_state_id ? (snap.states || []).find((s) => s.id === g.predicted_state_id) : null;
+      const goalSt = (snap.states || []).find((s) => s.id === g.goal_id);
+      const hasQty = goalSt && (goalSt.target_min !== null && goalSt.target_min !== undefined);
+      const anchorMs = predState && predState.time_ms ? Number(predState.time_ms) : scenarioAnchorMs(snap);
+      const baseRefMs = Math.min(anchorMs - 5 * 86400000, ...((snap.states || []).filter((s) => s.time_ms).map((s) => Number(s.time_ms))));
+      const predDayOffset = predState && predState.time_ms ? Math.round((Number(predState.time_ms) - baseRefMs) / 86400000) : 8;
+      const curMin = goalSt && goalSt.target_min !== null && goalSt.target_min !== undefined ? Number(goalSt.target_min) : 200;
+      const maxSliderQty = Math.max(400, Math.ceil(curMin * 1.6 / 10) * 10, predState && predState.value_num ? Math.ceil(Number(predState.value_num) * 1.5 / 10) * 10 : 400);
+      const earliestDay = goalSt && goalSt.target_earliest_ms ? Math.round((Number(goalSt.target_earliest_ms) - baseRefMs) / 86400000) : Math.max(0, predDayOffset - 4);
+      const latestDay = goalSt && goalSt.target_latest_ms ? Math.round((Number(goalSt.target_latest_ms) - baseRefMs) / 86400000) : predDayOffset + 4;
+      const maxDayRange = Math.max(30, predDayOffset + 15, latestDay + 5);
+      const isOverridden = Boolean(goalOverrides[overrideKey(g.goal_id)]);
+      const tunerHtml = (goalSt && g.status !== "cancelled") ? `
+        <div class="goal-tuner" data-goal-id="${esc(g.goal_id)}" data-base-ms="${esc(baseRefMs)}">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <strong style="color:#334155;">Ziel live testen (Menge &amp; Zeitpunkt)</strong>
+            ${isOverridden ? `<button type="button" class="nav-btn" data-reset-goal="${esc(g.goal_id)}" style="padding:2px 7px;font-size:0.72rem;">Zurücksetzen</button>` : ""}
+          </div>
+          ${hasQty ? `
+            <div class="tuner-row">
+              <span>Menge (min)</span>
+              <input type="range" min="0" max="${maxSliderQty}" step="5" value="${curMin}" data-tune-min="${esc(g.goal_id)}" />
+              <span class="mono" data-label-min="${esc(g.goal_id)}">≥ ${fmtNum(curMin, 0)} ${esc(goalSt.value_unit || "")}</span>
+            </div>
+          ` : ""}
+          <div class="tuner-row">
+            <label class="tuner-check">
+              <input type="checkbox" ${goalSt.target_earliest_ms ? "checked" : ""} data-toggle-earliest="${esc(g.goal_id)}" />
+              Frühestens
+            </label>
+            <input type="range" min="0" max="${maxDayRange}" step="1" value="${Math.max(0, earliestDay)}" ${goalSt.target_earliest_ms ? "" : "disabled"} data-tune-earliest="${esc(g.goal_id)}" />
+            <span class="mono" data-label-earliest="${esc(g.goal_id)}">${goalSt.target_earliest_ms ? fmtShortDate(goalSt.target_earliest_ms) : "aus"}</span>
+          </div>
+          <div class="tuner-row">
+            <label class="tuner-check">
+              <input type="checkbox" ${goalSt.target_latest_ms ? "checked" : ""} data-toggle-latest="${esc(g.goal_id)}" />
+              Spätestens
+            </label>
+            <input type="range" min="0" max="${maxDayRange}" step="1" value="${Math.max(0, latestDay)}" ${goalSt.target_latest_ms ? "" : "disabled"} data-tune-latest="${esc(g.goal_id)}" />
+            <span class="mono" data-label-latest="${esc(g.goal_id)}">${goalSt.target_latest_ms ? fmtShortDate(goalSt.target_latest_ms) : "aus"}</span>
+          </div>
+        </div>
+      ` : "";
       return `
-        <div class="goal-card ${esc(g.status)}">
+        <div class="goal-card ${esc(g.status)}" data-goal-card="${esc(g.goal_id)}">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
             <strong style="font-size:0.88rem;">${esc(g.label)}</strong>
-            <span class="badge ${esc(g.status)}">Stufe ${esc(g.stage)} · ${esc(g.status)}</span>
+            <span class="badge ${esc(g.status)}" data-goal-badge="${esc(g.goal_id)}">Stufe ${esc(g.stage)} · ${esc(g.status)}</span>
           </div>
           <div style="display:flex;justify-content:space-between;font-size:0.8rem;margin-top:4px;">
             <span>Ziel-Wahrscheinlichkeit</span>
-            <strong>${pct}</strong>
+            <strong data-goal-pct="${esc(g.goal_id)}">${pct}</strong>
           </div>
-          <div class="prob-bar-bg"><div class="prob-bar-fill" style="width:${pct};background:${col};"></div></div>
-          <div class="dim-grid">${dims}</div>
+          <div class="prob-bar-bg"><div class="prob-bar-fill" data-goal-bar="${esc(g.goal_id)}" style="width:${pct};background:${col};"></div></div>
+          <div class="dim-grid" data-goal-dims="${esc(g.goal_id)}">${dims}</div>
           ${branches}
-          <div style="margin-top:6px;font-size:0.78rem;color:#334155;">${esc(g.summary)}</div>
+          <div data-goal-summary="${esc(g.goal_id)}" style="margin-top:6px;font-size:0.78rem;color:#334155;">${esc(g.summary)}</div>
+          ${tunerHtml}
         </div>
       `;
     }).join("");
@@ -1590,12 +1849,15 @@ _HTML_SCRIPT = r"""
     if (selectedItem.kind === "state") {
       const s = (snap.states || []).find((x) => x.id === selectedItem.id);
       if (!s) return `<p style="font-size:0.82rem;">Zustand nicht mehr vorhanden.</p>`;
+      const timeDetail = s.modality === "desired"
+        ? (describeGoalTime(s) ? `${s.target_earliest_ms ? fmtTime(s.target_earliest_ms) : "—"} bis ${s.target_latest_ms ? fmtTime(s.target_latest_ms) : "—"}` : "offen")
+        : `${fmtTime(s.time_ms)}${s.sigma_seconds ? ` (± ${fmtDuration(s.sigma_seconds, null)})` : ""}`;
       return `
         <table class="kv-table">
           <tr><th>ID / Property</th><td class="mono">${esc(s.id)} · ${esc(s.property_name)}</td></tr>
           <tr><th>Modalität / Quelle</th><td>${esc(s.modality)} / <strong>${esc(s.source)}</strong> (${esc(s.measurement_source || "—")})</td></tr>
           <tr><th>Wert / Grenzen</th><td>${esc(describeStateValue(s))}</td></tr>
-          <tr><th>Zeitpunkt</th><td class="mono">${fmtTime(s.time_ms)}</td></tr>
+          <tr><th>${s.modality === "desired" ? "Ziel-Zeitfenster" : "Zeitpunkt"}</th><td class="mono">${esc(timeDetail)}</td></tr>
           <tr><th>Ort</th><td>${esc(s.location_label || "—")}</td></tr>
         </table>
       `;
@@ -1744,7 +2006,7 @@ _HTML_SCRIPT = r"""
                 <span class="mono" style="font-weight:500;color:#475569;">${snap.states.length} Zustände · ${snap.transformations.length} Transformationen · ${snap.edges.length} Kanten</span>
               </h2>
               ${zoomHtml}
-              <div class="svg-wrap">${renderGraphSvg(snap)}</div>
+              <div class="svg-wrap" id="zg-svg-host">${renderGraphSvg(snap)}</div>
               <div class="legend">
                 <span class="legend-item"><span class="swatch" style="border:2px solid #2563eb;background:#eff6ff;"></span>observed / happened (durchgezogen)</span>
                 <span class="legend-item"><span class="swatch" style="border:2px dashed #059669;background:#ecfdf5;"></span>predicted / planned (gestrichelt)</span>
@@ -1779,7 +2041,7 @@ _HTML_SCRIPT = r"""
             </div>
             <div class="card">
               <h2><span>Ausgewähltes Element</span></h2>
-              ${renderSelectionDetails(snap)}
+              <div id="zg-selection-host">${renderSelectionDetails(snap)}</div>
             </div>
           </div>
         </div>
@@ -1832,6 +2094,131 @@ _HTML_SCRIPT = r"""
         };
         render();
       });
+    });
+
+    const syncLiveDom = (updatedSnap) => {
+      const svgHost = document.getElementById("zg-svg-host");
+      if (svgHost) {
+        svgHost.innerHTML = renderGraphSvg(updatedSnap);
+        svgHost.querySelectorAll(".node-g").forEach((g) => {
+          g.addEventListener("click", () => {
+            selectedItem = { kind: g.getAttribute("data-kind"), id: g.getAttribute("data-id") };
+            render();
+          });
+        });
+      }
+      const selHost = document.getElementById("zg-selection-host");
+      if (selHost) selHost.innerHTML = renderSelectionDetails(updatedSnap);
+      for (const g of updatedSnap.goal_evaluations || []) {
+        const card = root.querySelector(`[data-goal-card="${g.goal_id}"]`);
+        if (card) card.className = `goal-card ${g.status}`;
+        const badge = root.querySelector(`[data-goal-badge="${g.goal_id}"]`);
+        if (badge) {
+          badge.className = `badge ${g.status}`;
+          badge.textContent = `Stufe ${g.stage} · ${g.status}`;
+        }
+        const pctEl = root.querySelector(`[data-goal-pct="${g.goal_id}"]`);
+        if (pctEl) pctEl.textContent = fmtPct(g.goal_probability);
+        const barEl = root.querySelector(`[data-goal-bar="${g.goal_id}"]`);
+        if (barEl) {
+          barEl.style.width = fmtPct(g.goal_probability);
+          barEl.style.background = statusColor(g.status).stroke;
+        }
+        const dimsEl = root.querySelector(`[data-goal-dims="${g.goal_id}"]`);
+        if (dimsEl) {
+          dimsEl.innerHTML = Object.entries(g.dimension_probs || {}).map(([dim, val]) => {
+            const isBroken = (g.broken_dimensions || []).includes(dim);
+            return `<div class="dim-chip ${isBroken ? "broken" : ""}"><span>${esc(dim)}</span><span>${fmtPct(val)}</span></div>`;
+          }).join("");
+        }
+        const sumEl = root.querySelector(`[data-goal-summary="${g.goal_id}"]`);
+        if (sumEl) sumEl.textContent = g.summary;
+      }
+    };
+
+    const setOverride = (goalId, patch, fullRender) => {
+      const k = overrideKey(goalId);
+      goalOverrides[k] = Object.assign({}, goalOverrides[k] || {}, patch);
+      if (fullRender) {
+        render();
+      } else {
+        syncLiveDom(getSnap());
+      }
+    };
+
+    root.querySelectorAll("[data-reset-goal]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        delete goalOverrides[overrideKey(btn.getAttribute("data-reset-goal"))];
+        render();
+      });
+    });
+
+    root.querySelectorAll("[data-tune-min]").forEach((inp) => {
+      const gid = inp.getAttribute("data-tune-min");
+      const curState = (snap.states || []).find((s) => s.id === gid);
+      const lbl = root.querySelector(`[data-label-min="${gid}"]`);
+      inp.addEventListener("input", () => {
+        const val = Number(inp.value);
+        if (lbl && curState) lbl.textContent = `≥ ${fmtNum(val, 0)} ${curState.value_unit || ""}`.trim();
+        setOverride(gid, { target_min: val }, false);
+      });
+      inp.addEventListener("change", () => render());
+    });
+
+    root.querySelectorAll("[data-toggle-earliest]").forEach((chk) => {
+      chk.addEventListener("change", () => {
+        const gid = chk.getAttribute("data-toggle-earliest");
+        const tuner = chk.closest(".goal-tuner");
+        const baseMs = Number(tuner.getAttribute("data-base-ms"));
+        const rng = root.querySelector(`[data-tune-earliest="${gid}"]`);
+        if (chk.checked) {
+          const valMs = baseMs + Number(rng ? rng.value : 0) * 86400000;
+          setOverride(gid, { target_earliest_ms: valMs }, true);
+        } else {
+          setOverride(gid, { target_earliest_ms: null }, true);
+        }
+      });
+    });
+
+    root.querySelectorAll("[data-tune-earliest]").forEach((inp) => {
+      const gid = inp.getAttribute("data-tune-earliest");
+      const tuner = inp.closest(".goal-tuner");
+      const baseMs = Number(tuner.getAttribute("data-base-ms"));
+      const lbl = root.querySelector(`[data-label-earliest="${gid}"]`);
+      inp.addEventListener("input", () => {
+        const ms = baseMs + Number(inp.value) * 86400000;
+        if (lbl) lbl.textContent = fmtShortDate(ms);
+        setOverride(gid, { target_earliest_ms: ms }, false);
+      });
+      inp.addEventListener("change", () => render());
+    });
+
+    root.querySelectorAll("[data-toggle-latest]").forEach((chk) => {
+      chk.addEventListener("change", () => {
+        const gid = chk.getAttribute("data-toggle-latest");
+        const tuner = chk.closest(".goal-tuner");
+        const baseMs = Number(tuner.getAttribute("data-base-ms"));
+        const rng = root.querySelector(`[data-tune-latest="${gid}"]`);
+        if (chk.checked) {
+          const valMs = baseMs + Number(rng ? rng.value : 10) * 86400000;
+          setOverride(gid, { target_latest_ms: valMs }, true);
+        } else {
+          setOverride(gid, { target_latest_ms: null }, true);
+        }
+      });
+    });
+
+    root.querySelectorAll("[data-tune-latest]").forEach((inp) => {
+      const gid = inp.getAttribute("data-tune-latest");
+      const tuner = inp.closest(".goal-tuner");
+      const baseMs = Number(tuner.getAttribute("data-base-ms"));
+      const lbl = root.querySelector(`[data-label-latest="${gid}"]`);
+      inp.addEventListener("input", () => {
+        const ms = baseMs + Number(inp.value) * 86400000;
+        if (lbl) lbl.textContent = fmtShortDate(ms);
+        setOverride(gid, { target_latest_ms: ms }, false);
+      });
+      inp.addEventListener("change", () => render());
     });
 
     const prev = document.getElementById("prev-phase");
