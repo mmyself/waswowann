@@ -16,10 +16,12 @@ from metacore.models import (
     Entity,
     EntityCreate,
     EntityKind,
+    EvidenceRef,
     StateCreate,
     TransformationCreate,
     TransformationDriver,
     ValueSource,
+    Visibility,
 )
 from metacore.repository import MetaCoreRepository
 
@@ -80,12 +82,22 @@ def create_server(config: Settings | None = None) -> FastMCP:
             raise ValueError("horizon_days muss >= 0 sein")
         now = now_ms()
         horizon_end = now + horizon_days * 86_400_000
-        evaluations = engine.evaluate_all_goals()
-        conflicts = engine.detect_uses_conflicts()
+        visible_ent_ids = {
+            e.id for e in repo.list_entities(include_archived=True, exclude_local_only=True)
+        }
+        visible_state_ids = {s.id for s in repo.list_states(exclude_local_only=True)}
+        evaluations = [
+            ev
+            for ev in engine.evaluate_all_goals()
+            if ev.entity_id in visible_ent_ids and ev.goal_id in visible_state_ids
+        ]
+        conflicts = [
+            c for c in engine.detect_uses_conflicts() if c.entity_id in visible_ent_ids
+        ]
 
         upcoming: list[dict[str, Any]] = []
         open_priors: list[dict[str, Any]] = []
-        for st in repo.list_states(modality="predicted"):
+        for st in repo.list_states(modality="predicted", exclude_local_only=True):
             ent = repo.get_entity(st.entity_id)
             ent_name = ent.name if ent else st.entity_id
             if st.time_ms is None or st.time_ms <= horizon_end:
@@ -129,8 +141,16 @@ def create_server(config: Settings | None = None) -> FastMCP:
     def inspect_worldline(entity_id_or_name: str) -> dict[str, Any]:
         """Zeigt Historie (observed), Zukunft (predicted/desired), verknüpfte Transformationen und Zielbewertungen einer Weltlinie."""
         ent = _resolve_entity(repo, entity_id_or_name, create_if_missing=False)
-        children = [e for e in repo.list_entities(include_archived=True) if e.parent_entity_id == ent.id]
-        states = repo.list_states(entity_id=ent.id)
+        if ent.visibility == "local_only":
+            raise ValueError(
+                f"Entität '{ent.name}' ist als local_only markiert und wird nicht extern exportiert."
+            )
+        children = [
+            e
+            for e in repo.list_entities(include_archived=True, exclude_local_only=True)
+            if e.parent_entity_id == ent.id
+        ]
+        states = repo.list_states(entity_id=ent.id, exclude_local_only=True)
 
         history_observed = [s.model_dump() for s in states if s.modality == "observed"]
         future_predicted = [s.model_dump() for s in states if s.modality == "predicted"]
@@ -293,12 +313,17 @@ def create_server(config: Settings | None = None) -> FastMCP:
         location_label: str = "",
         time_ms: int | None = None,
         sigma_seconds: float | None = None,
+        context: dict[str, str] | None = None,
+        evidence_refs: list[dict[str, Any]] | None = None,
+        assertion_confidence: float = 1.0,
+        visibility: Visibility = "normal",
         meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Erfasst eine reale Messung oder Null-Beobachtung, löst Trigger aus, kalibriert Vorlagen und liefert das Folgen-Feedback."""
         ent = _resolve_entity(
             repo, entity_id_or_name, create_if_missing=True, category=category
         )
+        parsed_refs = [EvidenceRef(**item) for item in (evidence_refs or [])]
         fb = engine.record_observation(
             StateCreate(
                 entity_id=ent.id,
@@ -318,6 +343,10 @@ def create_server(config: Settings | None = None) -> FastMCP:
                 location_label=location_label,
                 time_ms=time_ms if time_ms is not None else now_ms(),
                 sigma_seconds=sigma_seconds,
+                context=context or {},
+                evidence_refs=parsed_refs,
+                assertion_confidence=assertion_confidence,
+                visibility=visibility,
                 meta=meta or {},
             )
         )
@@ -346,6 +375,8 @@ def create_server(config: Settings | None = None) -> FastMCP:
         threshold_ok: float = 0.8,
         threshold_fail: float = 0.2,
         priority: float = 1.0,
+        context: dict[str, str] | None = None,
+        visibility: Visibility = "normal",
         meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Setzt ein desired-Ziel mit harten/weichen Ziel-Grenzen und bewertet sofort seine Machbarkeit."""
@@ -373,6 +404,8 @@ def create_server(config: Settings | None = None) -> FastMCP:
                 threshold_ok=threshold_ok,
                 threshold_fail=threshold_fail,
                 priority=priority,
+                context=context or {},
+                visibility=visibility,
                 meta=meta or {},
             )
         )

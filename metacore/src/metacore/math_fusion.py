@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 from metacore.models import ValueSource
+from metacore.units import convert_gaussian, normalize_unit_symbol
 
 SeriesAggregation = Literal["latest", "sum", "mean", "min", "max", "delta"]
 
@@ -19,20 +20,56 @@ def _require_finite(value: float, name: str) -> None:
         raise ValueError(f"{name} muss endlich sein")
 
 
+def make_context_key(ctx: Mapping[str, str] | None) -> tuple[tuple[str, str], ...]:
+    """Return a canonical sorted tuple representation of a context dictionary."""
+    if not ctx:
+        return ()
+    return tuple(sorted((str(k).strip(), str(v).strip()) for k, v in ctx.items()))
+
+
 @dataclass(frozen=True, slots=True)
 class GaussianValue:
-    """1D quantity or scalar parameter with mean and standard deviation."""
+    """1D quantity or scalar parameter with mean, standard deviation, unit, and context."""
 
     mean: float
     sigma: float
     source: ValueSource = "derived"
     measurement_source: str = ""
+    unit: str = ""
+    context: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         _require_finite(self.mean, "mean")
         _require_finite(self.sigma, "sigma")
         if self.sigma < 0.0:
             raise ValueError("sigma darf nicht negativ sein")
+
+
+def convert_gaussian_value(value: GaussianValue, target_unit: str | None) -> GaussianValue:
+    """Convert a GaussianValue to target_unit (no-op if either unit is empty)."""
+    norm_target = normalize_unit_symbol(target_unit)
+    norm_src = normalize_unit_symbol(value.unit)
+    if not norm_target:
+        return value
+    if not norm_src or norm_src == norm_target:
+        return GaussianValue(
+            mean=value.mean,
+            sigma=value.sigma,
+            source=value.source,
+            measurement_source=value.measurement_source,
+            unit=norm_target,
+            context=value.context,
+        )
+    new_mean, new_sigma = convert_gaussian(value.mean, value.sigma, norm_src, norm_target)
+    assert new_sigma is not None
+    return GaussianValue(
+        mean=new_mean,
+        sigma=new_sigma,
+        source=value.source,
+        measurement_source=value.measurement_source,
+        unit=norm_target,
+        context=value.context,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,16 +135,51 @@ def _collapse_same_source_1d(values: Sequence[GaussianValue]) -> list[GaussianVa
         spread = math.sqrt(math.fsum((g.mean - mu) ** 2 for g in group) / len(group))
         sigma = max(min(g.sigma for g in group), spread)
         independent.append(
-            GaussianValue(mean=mu, sigma=sigma, source=group[0].source, measurement_source=src)
+            GaussianValue(
+                mean=mu,
+                sigma=sigma,
+                source=group[0].source,
+                measurement_source=src,
+                unit=group[0].unit,
+                context=group[0].context,
+            )
         )
     return independent
 
 
-def fuse_1d(values: Sequence[GaussianValue], *, deduplicate_sources: bool = True) -> GaussianValue:
-    """Fuse 1D Gaussian estimates using inverse-variance precision weighting."""
+def _resolve_common_unit(units: Sequence[str], target_unit: str | None = None) -> str:
+    if target_unit is not None:
+        norm_target = normalize_unit_symbol(target_unit)
+        if norm_target:
+            return norm_target
+    for unit in units:
+        norm = normalize_unit_symbol(unit)
+        if norm:
+            return norm
+    return ""
+
+
+def fuse_1d(
+    values: Sequence[GaussianValue],
+    *,
+    deduplicate_sources: bool = True,
+    target_unit: str | None = None,
+    require_same_context: bool = True,
+) -> GaussianValue:
+    """Fuse 1D Gaussian estimates using inverse-variance precision weighting with unit/context guards."""
     if not values:
         raise ValueError("fuse_1d erfordert mindestens einen Wert")
-    items = _collapse_same_source_1d(values) if deduplicate_sources else list(values)
+
+    contexts = {v.context for v in values}
+    if require_same_context and len(contexts) > 1:
+        raise ValueError(
+            "Kontext-Konflikt in fuse_1d: Messungen mit unterschiedlichen Kontexten dürfen nicht vermischt werden."
+        )
+    common_context = values[0].context if len(contexts) == 1 else ()
+    common_unit = _resolve_common_unit([v.unit for v in values], target_unit=target_unit)
+    normalized = [convert_gaussian_value(v, common_unit) for v in values]
+
+    items = _collapse_same_source_1d(normalized) if deduplicate_sources else list(normalized)
     if len(items) == 1:
         only = items[0]
         return GaussianValue(
@@ -115,16 +187,24 @@ def fuse_1d(values: Sequence[GaussianValue], *, deduplicate_sources: bool = True
             sigma=only.sigma,
             source=only.source,
             measurement_source=only.measurement_source,
+            unit=only.unit,
+            context=common_context,
         )
 
     exact = [v for v in items if v.sigma == 0.0]
     if exact:
         mu = math.fsum(v.mean for v in exact) / len(exact)
-        return GaussianValue(mean=mu, sigma=0.0, source="derived")
+        return GaussianValue(mean=mu, sigma=0.0, source="derived", unit=common_unit, context=common_context)
 
     weights, fused_sigma = _precision_weights([v.sigma for v in items])
     fused_mean = math.fsum(w * v.mean for w, v in zip(weights, items))
-    return GaussianValue(mean=fused_mean, sigma=fused_sigma, source="derived")
+    return GaussianValue(
+        mean=fused_mean,
+        sigma=fused_sigma,
+        source="derived",
+        unit=common_unit,
+        context=common_context,
+    )
 
 
 def _to_enu(lat: float, lon: float, lat0: float, lon0: float) -> tuple[float, float]:
@@ -231,13 +311,17 @@ def generalize_habitat(
     return GeoPoint(lat=lat, lon=lon, sigma_meters=habitat_sigma, measurement_source="habitat_derived")
 
 
-def propagate_sum(values: Sequence[GaussianValue]) -> GaussianValue:
+def propagate_sum(
+    values: Sequence[GaussianValue], *, target_unit: str | None = None
+) -> GaussianValue:
     """Propagate mean and uncertainty for a sum of independent Gaussian values."""
     if not values:
         raise ValueError("propagate_sum erfordert mindestens einen Wert")
-    mean = math.fsum(v.mean for v in values)
-    sigma = math.sqrt(math.fsum(v.sigma ** 2 for v in values))
-    return GaussianValue(mean=mean, sigma=sigma, source="derived")
+    common_unit = _resolve_common_unit([v.unit for v in values], target_unit=target_unit)
+    norm_vals = [convert_gaussian_value(v, common_unit) for v in values]
+    mean = math.fsum(v.mean for v in norm_vals)
+    sigma = math.sqrt(math.fsum(v.sigma ** 2 for v in norm_vals))
+    return GaussianValue(mean=mean, sigma=sigma, source="derived", unit=common_unit)
 
 
 def propagate_product(a: GaussianValue, b: GaussianValue) -> GaussianValue:
@@ -368,23 +452,27 @@ def combine_goal_probability(
 
 def propagate_linear_combination(
     terms: Sequence[tuple[GaussianValue, GaussianValue]],
+    *,
+    target_unit: str | None = None,
 ) -> GaussianValue:
     """Propagate mean and RSS sigma for Y = sum_i c_i * X_i over uncertain inputs/weights."""
     if not terms:
         raise ValueError("terms darf nicht leer sein")
-    mean = sum(weight.mean * value.mean for value, weight in terms)
+    common_unit = _resolve_common_unit([value.unit for value, _ in terms], target_unit=target_unit)
+    norm_terms = [(convert_gaussian_value(value, common_unit), weight) for value, weight in terms]
+    mean = sum(weight.mean * value.mean for value, weight in norm_terms)
     sigma = math.sqrt(
         sum(
             (weight.mean * value.sigma) ** 2 + (value.mean * weight.sigma) ** 2
-            for value, weight in terms
+            for value, weight in norm_terms
         )
     )
     source: ValueSource = (
         "ai_prior"
-        if any("ai_prior" in (value.source, weight.source) for value, weight in terms)
+        if any("ai_prior" in (value.source, weight.source) for value, weight in norm_terms)
         else "derived"
     )
-    return GaussianValue(mean=mean, sigma=sigma, source=source)
+    return GaussianValue(mean=mean, sigma=sigma, source=source, unit=common_unit)
 
 
 def propagate_ratio(numerator: GaussianValue, denominator: GaussianValue) -> GaussianValue:
@@ -403,42 +491,50 @@ def propagate_ratio(numerator: GaussianValue, denominator: GaussianValue) -> Gau
 
 
 def aggregate_series(
-    samples: Sequence[GaussianValue], aggregation: SeriesAggregation = "latest"
+    samples: Sequence[GaussianValue],
+    aggregation: SeriesAggregation = "latest",
+    *,
+    target_unit: str | None = None,
 ) -> GaussianValue:
     """Aggregate an ordered time series of Gaussian samples into a single summary value."""
     if not samples:
         raise ValueError("samples darf nicht leer sein")
+    common_unit = _resolve_common_unit([s.unit for s in samples], target_unit=target_unit)
+    norm_samples = [convert_gaussian_value(s, common_unit) for s in samples]
     if aggregation == "latest":
-        return samples[-1]
+        return norm_samples[-1]
     if aggregation == "min":
-        return min(samples, key=lambda s: s.mean)
+        return min(norm_samples, key=lambda s: s.mean)
     if aggregation == "max":
-        return max(samples, key=lambda s: s.mean)
+        return max(norm_samples, key=lambda s: s.mean)
 
     source: ValueSource = (
-        "ai_prior" if any(s.source == "ai_prior" for s in samples) else "derived"
+        "ai_prior" if any(s.source == "ai_prior" for s in norm_samples) else "derived"
     )
     if aggregation == "sum":
         return GaussianValue(
-            mean=sum(s.mean for s in samples),
-            sigma=math.sqrt(sum(s.sigma**2 for s in samples)),
+            mean=sum(s.mean for s in norm_samples),
+            sigma=math.sqrt(sum(s.sigma**2 for s in norm_samples)),
             source=source,
+            unit=common_unit,
         )
     if aggregation == "mean":
-        n = len(samples)
+        n = len(norm_samples)
         return GaussianValue(
-            mean=sum(s.mean for s in samples) / n,
-            sigma=math.sqrt(sum(s.sigma**2 for s in samples)) / n,
+            mean=sum(s.mean for s in norm_samples) / n,
+            sigma=math.sqrt(sum(s.sigma**2 for s in norm_samples)) / n,
             source=source,
+            unit=common_unit,
         )
     if aggregation == "delta":
-        if len(samples) == 1:
-            return GaussianValue(mean=0.0, sigma=0.0, source=source)
-        first, last = samples[0], samples[-1]
+        if len(norm_samples) == 1:
+            return GaussianValue(mean=0.0, sigma=0.0, source=source, unit=common_unit)
+        first, last = norm_samples[0], norm_samples[-1]
         return GaussianValue(
             mean=last.mean - first.mean,
             sigma=math.hypot(last.sigma, first.sigma),
             source=source,
+            unit=common_unit,
         )
     raise ValueError(f"Unbekannte Aggregation: {aggregation}")
 
@@ -477,3 +573,102 @@ def compute_modifier_factor(
     factor = max(min_factor, 1.0 - falloff_per_unit * dist)
     sigma = sigma_penalty_per_unit * dist + falloff_per_unit * observed.sigma
     return GaussianValue(mean=factor, sigma=sigma, source="derived")
+
+
+def propagate_exponential_decay(
+    initial: GaussianValue,
+    equilibrium: GaussianValue,
+    dt_seconds: float,
+    tau: GaussianValue,
+    *,
+    dt_sigma_seconds: float = 0.0,
+) -> GaussianValue:
+    """Propagate x(t) = x_inf + (x_0 - x_inf) * exp(-dt / tau) with Gaussian error propagation."""
+    _require_finite(dt_seconds, "dt_seconds")
+    _require_finite(dt_sigma_seconds, "dt_sigma_seconds")
+    if dt_seconds < 0.0:
+        raise ValueError("dt_seconds darf nicht negativ sein")
+    if dt_sigma_seconds < 0.0:
+        raise ValueError("dt_sigma_seconds darf nicht negativ sein")
+    if tau.mean <= 0.0:
+        raise ValueError("tau.mean muss > 0 sein")
+
+    out_unit = _resolve_common_unit([initial.unit, equilibrium.unit])
+    init_norm = convert_gaussian_value(initial, out_unit)
+    eq_norm = convert_gaussian_value(equilibrium, out_unit)
+
+    decay = math.exp(-dt_seconds / tau.mean)
+    delta = init_norm.mean - eq_norm.mean
+    mean = eq_norm.mean + delta * decay
+
+    d_x0 = decay
+    d_xinf = 1.0 - decay
+    d_tau = delta * decay * (dt_seconds / (tau.mean**2))
+    d_dt = -delta * decay / tau.mean
+
+    sigma = math.sqrt(
+        (d_x0 * init_norm.sigma) ** 2
+        + (d_xinf * eq_norm.sigma) ** 2
+        + (d_tau * tau.sigma) ** 2
+        + (d_dt * dt_sigma_seconds) ** 2
+    )
+    src: ValueSource = (
+        "ai_prior"
+        if "ai_prior" in (init_norm.source, eq_norm.source, tau.source)
+        else "derived"
+    )
+    return GaussianValue(
+        mean=mean,
+        sigma=sigma,
+        source=src,
+        unit=out_unit,
+        context=init_norm.context,
+    )
+
+
+def propagate_cumulative_balance(
+    flows: Sequence[tuple[GaussianValue, float]],
+    *,
+    initial: GaussianValue | None = None,
+    min_clamp: float | None = None,
+    max_clamp: float | None = None,
+    target_unit: str | None = None,
+) -> GaussianValue:
+    """Accumulate signed inflows/outflows over an optional initial storage level with RSS uncertainty."""
+    if initial is None and not flows:
+        raise ValueError("propagate_cumulative_balance erfordert initial oder mindestens einen Flow")
+    if min_clamp is not None:
+        _require_finite(min_clamp, "min_clamp")
+    if max_clamp is not None:
+        _require_finite(max_clamp, "max_clamp")
+    if min_clamp is not None and max_clamp is not None and min_clamp > max_clamp:
+        raise ValueError("min_clamp darf nicht größer als max_clamp sein")
+
+    unit_pool = ([initial.unit] if initial is not None else []) + [v.unit for v, _ in flows]
+    common_unit = _resolve_common_unit(unit_pool, target_unit=target_unit)
+
+    terms: list[tuple[GaussianValue, GaussianValue]] = []
+    if initial is not None:
+        terms.append((convert_gaussian_value(initial, common_unit), GaussianValue(1.0, 0.0, source="derived")))
+    for val, signed_weight in flows:
+        _require_finite(signed_weight, "signed_weight")
+        terms.append(
+            (
+                convert_gaussian_value(val, common_unit),
+                GaussianValue(float(signed_weight), 0.0, source="derived"),
+            )
+        )
+
+    combined = propagate_linear_combination(terms, target_unit=common_unit or None)
+    mean = combined.mean
+    if min_clamp is not None:
+        mean = max(min_clamp, mean)
+    if max_clamp is not None:
+        mean = min(max_clamp, mean)
+    return GaussianValue(
+        mean=mean,
+        sigma=combined.sigma,
+        source=combined.source,
+        unit=common_unit,
+        context=initial.context if initial is not None else (),
+    )

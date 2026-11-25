@@ -12,16 +12,18 @@ metacore/
 ├── src/metacore/
 │   ├── config.py                   # Settings (METACORE_DB_PATH, Default: data/metacore.sqlite3)
 │   ├── db.py                       # WAL-SQLite-Verbindung (PRAGMA foreign_keys = ON) & Migrationen
-│   ├── migrations/001_initial.sql  # 4 Kerntabellen + Indizes + Check-Invariants
-│   ├── models.py                   # Strikte Pydantic-v2-Verträge (extra='forbid', finite floats)
-│   ├── repository.py               # Typisierter SQLite-Datenzugriff (Entities, States, Txs, Edges)
-│   ├── math_fusion.py              # 1D-Gauß, 2D-ENU-Ortsfusion, Habitat-Wolken, Fehlerfortpflanzung
+│   ├── migrations/                 # 001_initial, 002_context, 003_raw_samples_provenance_visibility
+│   ├── models.py                   # Strikte Pydantic-v2-Verträge (State, EvidenceRef, RawSample, Visibility)
+│   ├── units.py                    # Dimensionssicheres Einheiten-Register (inkl. affiner °C/°F/K-Umrechnung)
+│   ├── repository.py               # Typisierter SQLite-Datenzugriff (4 Kerntabellen + raw_samples-Puffer)
+│   ├── math_fusion.py              # 1D/2D-Gaußfusion, Fehlerfortpflanzung, Kinetik (decay) & Speicherbilanz
 │   ├── clocks.py                   # 7 globale Uhren + Eigen-Intervalle (Δt), Rayleigh-Test, Phasen-Wächter
-│   ├── engine.py                   # Trigger, Recipe-Mix, Ratio-Guards, Modifier, parent_id-Rollup, Eskalation
+│   ├── rollup.py                   # Verdichtung hochfrequenter Rohdaten nach Zeit-/Phasenfenster & Kontext
+│   ├── engine.py                   # Trigger, Recipe-Mix, Kinetik, Bilanz, Ausschluss-Wächter, Eskalation
 │   ├── visualizer.py               # Live-SQLite-Snapshot-Export & Standalone-HTML-Visualizer
-│   ├── mcp_server.py               # FastMCP-Server (stdio) mit 8 semantischen Werkzeugen
+│   ├── mcp_server.py               # FastMCP-Server (stdio) mit 8 semantischen Werkzeugen & local_only-Schutz
 │   └── seeds/                      # 6 Referenz-Szenarien (Körnerbrut, Riesenschirmling, Roboter, …)
-└── tests/                          # 36 Tests (M1–M5, Visualizer, Clocks/Periodik)
+└── tests/                          # M1–M5, Visualizer, Clocks/Periodik, Units/Context, Kinetik, Roll-Up
 ```
 
 ---
@@ -54,10 +56,12 @@ Alle Fakten, Pläne, Rezepte, Umweltbedingungen und Ressourcenbelegungen liegen 
 * **Fehlerfortpflanzung:** Summen, Linearkombinationen (`recipe_mix`), Produkte (`propagate_product`), Teilungen (`propagate_split`) und Quotienten (`propagate_ratio`).
 * **Vorlagen-Lernen (`calibrate_parameter`):** `ai_prior`-Faktoren/Dauern werden ab der ersten echten `measured`-Messung bayessch geschärft und auf `measured` umgestellt.
 
-### Kausale Engine (`engine.py`)
-* **Multi-Condition-Trigger (`AND` / `OR`):** Zeitfenster-Aggregation (`latest`, `sum`, `mean`, `min`, `max`, `delta`) plus `period_phase`-Bedingungen.
-* **`recipe_mix`, `ratio_guards` & `modifiers`:** Rezept-Massenbilanzen, Verhältniswächter (z. B. Wasser/Holz-Verhältnis) und Umwelt-Modifikatoren (z. B. Temperatur-/Luftfeuchte-Korridor verschiebt Fruchtungsdauer dynamisch über `_reapply_modifiers_for_observation`).
-* **Mehrstufige Ketten & verschachtelte Unterschritte (`parent_id`):** Vorwärtspropagation (`propagate_downstream`) aktualisiert nachgelagerte Kettenschritte; Makro-Transformationen aggregieren Dauer/Kosten/Erfolg aus ihren Kindern (`_rollup_composite_tx`); `abort_goal` kaskadiert sauber nach unten (Kinder) und oben (verwaiste Vorstufen) inklusive `uses`-Freigabe.
+### Kausale Engine (`engine.py`) & Meta-Erweiterungen
+* **Einheiten- & Kontext-Normalisierung (`units.py`, `context`):** Dimensionssichere Umrechnung (inkl. linearer `sigma`-Skalierung ohne Offset bei `°C ↔ K ↔ °F`) in Fusion, Zielen, Modifikatoren und Rezepten; `context`-Tags verhindern das stumme Vermischen inkompatibler Messbedingungen (z. B. trocken vs. eingeweicht).
+* **Kontinuierliche Kinetik & Speicher (`decay_step`, `cumulative_balance`):** Exponentielle Annäherung ans Gleichgewicht inkl. automatischer `τ`-Kalibrierung aus Beobachtungen sowie zeitfensterbezogene Speicherbilanzen mit `min_clamp`/`max_clamp`.
+* **Multi-Condition-Trigger & Ausschluss-Wächter (`forbid_coexistence`):** `AND`/`OR`-Trigger, Zeitfenster-Aggregation (`latest`, `sum`, `mean`, `min`, `max`, `delta`), `period_phase`- und optional räumlich gewichtete Koexistenz-Wächter.
+* **Hochfrequenz-Roll-Up, Provenienz & Sichtbarkeit (`rollup.py`):** Kompakter `raw_samples`-Puffer verdichtet dichte Zeitreihen kontextrein pro Stunde/Tag/Uhrphase (`μ ± σ`, Min/Max, Trendsteigung) inkl. `evidence_refs`, epistemischer `assertion_confidence ∈ (0, 1]` und `visibility="local_only"`-Schutz an der MCP-Grenze.
+* **Mehrstufige Ketten & verschachtelte Unterschritte (`parent_id`):** Vorwärtspropagation (`propagate_downstream`), Makro-Rollup (`_rollup_composite_tx`) und kaskadierendes `abort_goal` inklusive `uses`-Freigabe.
 * **4-Stufen-Zielbewertung (`evaluate_goal`):** Bewertet dynamisch `wann`, `wo`, `wie_viel` und `vorbedingung` (`stage` 2 = `on_track`, 3 = `at_risk`, 4 = `broken`).
 
 ### Uhren & Perioden-Detektor (`clocks.py`)

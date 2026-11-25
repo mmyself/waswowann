@@ -16,8 +16,8 @@ from metacore.repository import MetaCoreRepository
 def test_migrate_creates_tables_and_is_idempotent(settings: Settings) -> None:
     version_first = migrate(settings)
     version_second = migrate(settings)
-    assert version_first == 1
-    assert version_second == 1
+    assert version_first == 3
+    assert version_second == 3
 
     with connect(settings.database_path) as conn:
         tables = {
@@ -26,8 +26,8 @@ def test_migrate_creates_tables_and_is_idempotent(settings: Settings) -> None:
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
         }
-        assert tables == {"entities", "states", "transformations", "edges"}
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert tables == {"entities", "states", "transformations", "edges", "raw_samples"}
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_multiple_property_states_on_same_entity(repo: MetaCoreRepository) -> None:

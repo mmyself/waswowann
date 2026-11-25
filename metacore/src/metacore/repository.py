@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from typing import Any
 from uuid import uuid4
 
@@ -16,12 +17,17 @@ from metacore.models import (
     EdgeRole,
     Entity,
     EntityCreate,
+    EvidenceRef,
+    RawSample,
+    RawSampleCreate,
     State,
     StateCreate,
     StateModality,
     Transformation,
     TransformationCreate,
     TransformationModality,
+    Visibility,
+    context_matches,
 )
 
 
@@ -30,6 +36,10 @@ def _new_id(prefix: str, explicit: str | None) -> str:
 
 
 def _row_to_entity(row: sqlite3.Row) -> Entity:
+    try:
+        vis: Visibility = row["visibility"]
+    except IndexError:
+        vis = "normal"
     return Entity(
         id=row["id"],
         name=row["name"],
@@ -38,6 +48,7 @@ def _row_to_entity(row: sqlite3.Row) -> Entity:
         source=row["source"],
         parent_entity_id=row["parent_entity_id"],
         archived=bool(row["archived"]),
+        visibility=vis,
         meta=json.loads(row["meta_json"]),
         created_at_ms=row["created_at_ms"],
         updated_at_ms=row["updated_at_ms"],
@@ -45,6 +56,22 @@ def _row_to_entity(row: sqlite3.Row) -> Entity:
 
 
 def _row_to_state(row: sqlite3.Row) -> State:
+    try:
+        raw_ctx = row["context_json"]
+    except IndexError:
+        raw_ctx = "{}"
+    try:
+        raw_refs = row["evidence_refs_json"]
+    except IndexError:
+        raw_refs = "[]"
+    try:
+        confidence = float(row["assertion_confidence"])
+    except IndexError:
+        confidence = 1.0
+    try:
+        vis: Visibility = row["visibility"]
+    except IndexError:
+        vis = "normal"
     return State(
         id=row["id"],
         entity_id=row["entity_id"],
@@ -74,9 +101,30 @@ def _row_to_state(row: sqlite3.Row) -> State:
         threshold_ok=row["threshold_ok"],
         threshold_fail=row["threshold_fail"],
         priority=row["priority"],
+        context=json.loads(raw_ctx),
+        evidence_refs=[EvidenceRef(**item) for item in json.loads(raw_refs)],
+        assertion_confidence=confidence,
+        visibility=vis,
         meta=json.loads(row["meta_json"]),
         created_at_ms=row["created_at_ms"],
         updated_at_ms=row["updated_at_ms"],
+    )
+
+
+def _row_to_raw_sample(row: sqlite3.Row) -> RawSample:
+    return RawSample(
+        id=row["id"],
+        entity_id=row["entity_id"],
+        property_name=row["property_name"],
+        time_ms=row["time_ms"],
+        value_num=row["value_num"],
+        value_sigma=row["value_sigma"],
+        value_unit=row["value_unit"],
+        measurement_source=row["measurement_source"],
+        context=json.loads(row["context_json"]),
+        evidence_ref=row["evidence_ref"],
+        rolled_up_state_id=row["rolled_up_state_id"],
+        created_at_ms=row["created_at_ms"],
     )
 
 
@@ -136,8 +184,8 @@ class MetaCoreRepository:
                 """
                 INSERT INTO entities (
                     id, name, kind, category, source, parent_entity_id,
-                    archived, meta_json, created_at_ms, updated_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    archived, visibility, meta_json, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entity_id,
@@ -147,6 +195,7 @@ class MetaCoreRepository:
                     data.source,
                     data.parent_entity_id,
                     int(data.archived),
+                    data.visibility,
                     json.dumps(data.meta),
                     ts,
                     ts,
@@ -161,12 +210,17 @@ class MetaCoreRepository:
             row = conn.execute("SELECT * FROM entities WHERE id = ?", (entity_id,)).fetchone()
         return _row_to_entity(row) if row else None
 
-    def list_entities(self, *, include_archived: bool = False) -> list[Entity]:
+    def list_entities(
+        self, *, include_archived: bool = False, exclude_local_only: bool = False
+    ) -> list[Entity]:
         """List entities ordered by creation time."""
-        query = "SELECT * FROM entities"
+        clauses: list[str] = []
         if not include_archived:
-            query += " WHERE archived = 0"
-        query += " ORDER BY created_at_ms, rowid"
+            clauses.append("archived = 0")
+        if exclude_local_only:
+            clauses.append("visibility = 'normal'")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = f"SELECT * FROM entities{where} ORDER BY created_at_ms, rowid"
         with db(self.config) as conn:
             rows = conn.execute(query).fetchall()
         return [_row_to_entity(r) for r in rows]
@@ -177,12 +231,15 @@ class MetaCoreRepository:
         *,
         category: str | None = None,
         include_archived: bool = False,
+        exclude_local_only: bool = False,
     ) -> list[Entity]:
         """Search entities by case-insensitive name substring and optional category."""
         clauses: list[str] = []
         params: list[object] = []
         if not include_archived:
             clauses.append("archived = 0")
+        if exclude_local_only:
+            clauses.append("visibility = 'normal'")
         if category is not None:
             clauses.append("category = ?")
             params.append(category)
@@ -214,8 +271,9 @@ class MetaCoreRepository:
                     target_min, target_max, target_preferred, target_value_text,
                     target_earliest_ms, target_latest_ms, target_radius_meters,
                     threshold_ok, threshold_fail, priority,
+                    context_json, evidence_refs_json, assertion_confidence, visibility,
                     meta_json, created_at_ms, updated_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     state_id,
@@ -246,6 +304,10 @@ class MetaCoreRepository:
                     data.threshold_ok,
                     data.threshold_fail,
                     data.priority,
+                    json.dumps(data.context),
+                    json.dumps([ref.model_dump() for ref in data.evidence_refs]),
+                    data.assertion_confidence,
+                    data.visibility,
                     json.dumps(data.meta),
                     ts,
                     ts,
@@ -266,8 +328,10 @@ class MetaCoreRepository:
         entity_id: str | None = None,
         property_name: str | None = None,
         modality: StateModality | None = None,
+        context_filter: dict[str, str] | None = None,
+        exclude_local_only: bool = False,
     ) -> list[State]:
-        """List states optionally filtered by entity, property name, or modality."""
+        """List states optionally filtered by entity, property name, modality, context, or visibility."""
         clauses: list[str] = []
         params: list[object] = []
         if entity_id is not None:
@@ -279,11 +343,18 @@ class MetaCoreRepository:
         if modality is not None:
             clauses.append("modality = ?")
             params.append(modality)
+        if exclude_local_only:
+            clauses.append(
+                "visibility = 'normal' AND entity_id NOT IN (SELECT id FROM entities WHERE visibility = 'local_only')"
+            )
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         query = f"SELECT * FROM states{where} ORDER BY time_ms IS NULL, time_ms, created_at_ms, rowid"
         with db(self.config) as conn:
             rows = conn.execute(query, params).fetchall()
-        return [_row_to_state(r) for r in rows]
+        states = [_row_to_state(r) for r in rows]
+        if context_filter:
+            states = [s for s in states if context_matches(s.context, context_filter)]
+        return states
 
     def update_state(self, state_id: str, **updates: Any) -> State:
         """Update fields on an existing state while enforcing all StateCreate invariants."""
@@ -307,7 +378,8 @@ class MetaCoreRepository:
                     target_min = ?, target_max = ?, target_preferred = ?, target_value_text = ?,
                     target_earliest_ms = ?, target_latest_ms = ?, target_radius_meters = ?,
                     threshold_ok = ?, threshold_fail = ?, priority = ?,
-                    meta_json = ?, updated_at_ms = ?
+                    context_json = ?, evidence_refs_json = ?, assertion_confidence = ?,
+                    visibility = ?, meta_json = ?, updated_at_ms = ?
                 WHERE id = ?
                 """,
                 (
@@ -338,6 +410,10 @@ class MetaCoreRepository:
                     validated.threshold_ok,
                     validated.threshold_fail,
                     validated.priority,
+                    json.dumps(validated.context),
+                    json.dumps([ref.model_dump() for ref in validated.evidence_refs]),
+                    validated.assertion_confidence,
+                    validated.visibility,
                     json.dumps(validated.meta),
                     ts,
                     state_id,
@@ -550,3 +626,97 @@ class MetaCoreRepository:
             )
             row = conn.execute("SELECT * FROM edges WHERE id = ?", (edge_id,)).fetchone()
         return _row_to_edge(row)
+
+    # --- Raw high-frequency telemetry samples ---
+
+    def insert_raw_samples(self, samples: Sequence[RawSampleCreate]) -> list[RawSample]:
+        """Batch-insert raw telemetry samples into the flat buffer table."""
+        if not samples:
+            return []
+        ts = now_ms()
+        ids: list[str] = []
+        rows_data: list[tuple[Any, ...]] = []
+        for sample in samples:
+            sid = _new_id("raw", sample.id)
+            ids.append(sid)
+            rows_data.append(
+                (
+                    sid,
+                    sample.entity_id,
+                    sample.property_name,
+                    sample.time_ms,
+                    sample.value_num,
+                    sample.value_sigma,
+                    sample.value_unit,
+                    sample.measurement_source,
+                    json.dumps(sample.context),
+                    sample.evidence_ref,
+                    None,
+                    ts,
+                )
+            )
+        with db(self.config) as conn:
+            conn.executemany(
+                """
+                INSERT INTO raw_samples (
+                    id, entity_id, property_name, time_ms, value_num, value_sigma,
+                    value_unit, measurement_source, context_json, evidence_ref,
+                    rolled_up_state_id, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows_data,
+            )
+            placeholders = ",".join("?" for _ in ids)
+            fetched = conn.execute(
+                f"SELECT * FROM raw_samples WHERE id IN ({placeholders}) ORDER BY time_ms, rowid",
+                ids,
+            ).fetchall()
+        return [_row_to_raw_sample(r) for r in fetched]
+
+    def list_raw_samples(
+        self,
+        *,
+        entity_id: str | None = None,
+        property_name: str | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        only_unrolled: bool = False,
+        context_filter: dict[str, str] | None = None,
+    ) -> list[RawSample]:
+        """Query raw telemetry samples by entity, property, time range, or roll-up status."""
+        clauses: list[str] = []
+        params: list[object] = []
+        if entity_id is not None:
+            clauses.append("entity_id = ?")
+            params.append(entity_id)
+        if property_name is not None:
+            clauses.append("property_name = ?")
+            params.append(property_name)
+        if start_ms is not None:
+            clauses.append("time_ms >= ?")
+            params.append(start_ms)
+        if end_ms is not None:
+            clauses.append("time_ms <= ?")
+            params.append(end_ms)
+        if only_unrolled:
+            clauses.append("rolled_up_state_id IS NULL")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM raw_samples{where} ORDER BY time_ms, created_at_ms, rowid"
+        with db(self.config) as conn:
+            rows = conn.execute(sql, params).fetchall()
+        result = [_row_to_raw_sample(r) for r in rows]
+        if context_filter:
+            result = [s for s in result if context_matches(s.context, context_filter)]
+        return result
+
+    def mark_raw_samples_rolled_up(self, sample_ids: Sequence[str], state_id: str) -> int:
+        """Link raw samples to the rolled-up State node that compressed them."""
+        if not sample_ids:
+            return 0
+        placeholders = ",".join("?" for _ in sample_ids)
+        with db(self.config) as conn:
+            cur = conn.execute(
+                f"UPDATE raw_samples SET rolled_up_state_id = ? WHERE id IN ({placeholders})",
+                [state_id, *sample_ids],
+            )
+            return cur.rowcount

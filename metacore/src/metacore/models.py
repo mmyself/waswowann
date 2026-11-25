@@ -18,6 +18,7 @@ EdgeDirection = Literal["in", "out"]
 EdgeRole = Literal["consumes", "uses", "triggers", "produces"]
 LogicGroup = Literal["AND", "CHOICE_OR", "WORLD_OR"]
 EdgeOutcome = Literal["pending", "chosen", "not_chosen", "occurred", "did_not_occur"]
+Visibility = Literal["normal", "local_only"]
 
 
 class StrictModel(BaseModel):
@@ -33,6 +34,40 @@ def _strip_non_empty(value: str, field_name: str) -> str:
     return stripped
 
 
+class EvidenceRef(StrictModel):
+    """Generic pointer to a backing artifact (photo, sensor log, raw batch, document, URL)."""
+
+    kind: str = Field(min_length=1, max_length=60)
+    ref: str = Field(min_length=1, max_length=500)
+    label: str = Field(default="", max_length=240)
+    checksum: str = Field(default="", max_length=128)
+
+    @field_validator("kind", "ref")
+    @classmethod
+    def check_ref_non_empty(cls, value: str, info: Any) -> str:
+        return _strip_non_empty(value, info.field_name)
+
+
+def _normalize_context(value: dict[str, Any] | None) -> dict[str, str]:
+    if not value:
+        return {}
+    normalized: dict[str, str] = {}
+    for raw_k, raw_v in value.items():
+        k = str(raw_k).strip()
+        v = str(raw_v).strip()
+        if not k or not v:
+            raise ValueError("context-Schlüssel und -Werte dürfen nicht leer sein")
+        normalized[k] = v
+    return normalized
+
+
+def context_matches(state_context: dict[str, str], required: dict[str, str] | None) -> bool:
+    """Return True if no context filter is required or all required key/value pairs match."""
+    if not required:
+        return True
+    return all(state_context.get(str(k).strip()) == str(v).strip() for k, v in required.items())
+
+
 class EntityCreate(StrictModel):
     """Input payload for creating a worldline or interchangeable type entity."""
 
@@ -43,6 +78,7 @@ class EntityCreate(StrictModel):
     source: EntitySource = "observed"
     parent_entity_id: str | None = Field(default=None, min_length=1, max_length=128)
     archived: bool = False
+    visibility: Visibility = "normal"
     meta: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("name", "category")
@@ -61,6 +97,7 @@ class Entity(StrictModel):
     source: EntitySource
     parent_entity_id: str | None
     archived: bool
+    visibility: Visibility = "normal"
     meta: dict[str, Any]
     created_at_ms: int
     updated_at_ms: int
@@ -102,12 +139,25 @@ class StateCreate(StrictModel):
     threshold_fail: float = Field(default=0.2, ge=0.0, le=1.0)
     priority: float = Field(default=1.0, ge=0.0)
 
+    context: dict[str, str] = Field(default_factory=dict)
+    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    assertion_confidence: float = Field(default=1.0, gt=0.0, le=1.0)
+    visibility: Visibility = "normal"
     meta: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("property_name", "label")
     @classmethod
     def check_non_empty(cls, value: str, info: Any) -> str:
         return _strip_non_empty(value, info.field_name)
+
+    @field_validator("context", mode="before")
+    @classmethod
+    def normalize_context_field(cls, value: Any) -> dict[str, str]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise TypeError("context muss ein Schlüssel-Wert-Objekt sein")
+        return _normalize_context(value)
 
     @model_validator(mode="after")
     def validate_state_invariants(self) -> StateCreate:
@@ -176,6 +226,10 @@ class State(StrictModel):
     threshold_fail: float
     priority: float
 
+    context: dict[str, str] = Field(default_factory=dict)
+    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    assertion_confidence: float = 1.0
+    visibility: Visibility = "normal"
     meta: dict[str, Any]
     created_at_ms: int
     updated_at_ms: int
@@ -270,4 +324,50 @@ class Edge(StrictModel):
     ratio_mean: float | None
     ratio_sigma: float | None
     resource_released: bool
+    created_at_ms: int
+
+
+class RawSampleCreate(StrictModel):
+    """Input payload for high-frequency raw telemetry prior to graph roll-up."""
+
+    id: str | None = Field(default=None, min_length=1, max_length=128)
+    entity_id: str = Field(min_length=1, max_length=128)
+    property_name: str = Field(min_length=1, max_length=120)
+    time_ms: int
+    value_num: float
+    value_sigma: float | None = Field(default=None, ge=0.0)
+    value_unit: str = Field(default="", max_length=40)
+    measurement_source: str = Field(default="", max_length=200)
+    context: dict[str, str] = Field(default_factory=dict)
+    evidence_ref: str = Field(default="", max_length=500)
+
+    @field_validator("property_name")
+    @classmethod
+    def check_prop_non_empty(cls, value: str, info: Any) -> str:
+        return _strip_non_empty(value, info.field_name)
+
+    @field_validator("context", mode="before")
+    @classmethod
+    def normalize_sample_context(cls, value: Any) -> dict[str, str]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise TypeError("context muss ein Schlüssel-Wert-Objekt sein")
+        return _normalize_context(value)
+
+
+class RawSample(StrictModel):
+    """Persisted raw time-series sample."""
+
+    id: str
+    entity_id: str
+    property_name: str
+    time_ms: int
+    value_num: float
+    value_sigma: float | None
+    value_unit: str
+    measurement_source: str
+    context: dict[str, str] = Field(default_factory=dict)
+    evidence_ref: str = ""
+    rolled_up_state_id: str | None = None
     created_at_ms: int

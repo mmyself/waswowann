@@ -11,6 +11,7 @@ from typing import Any, Literal
 from pydantic import Field
 
 from metacore.clocks import (
+    ClockId,
     PeriodicityReport,
     TimeSample,
     analyze_periodicity,
@@ -25,8 +26,13 @@ from metacore.math_fusion import (
     calibrate_parameter,
     combine_goal_probability,
     compute_modifier_factor,
+    convert_gaussian_value,
+    fuse_1d,
+    make_context_key,
     probability_in_bounds,
     probability_within_radius,
+    propagate_cumulative_balance,
+    propagate_exponential_decay,
     propagate_linear_combination,
     propagate_product,
     propagate_ratio,
@@ -36,13 +42,19 @@ from metacore.models import (
     Edge,
     EdgeCreate,
     EdgeRole,
+    RawSample,
+    RawSampleCreate,
     State,
     StateCreate,
+    StateModality,
     StrictModel,
     Transformation,
     TransformationCreate,
+    context_matches,
 )
 from metacore.repository import MetaCoreRepository
+from metacore.rollup import RollupWindowKind, compute_rollup_buckets
+from metacore.units import UnitCompatibilityError, are_units_compatible, convert_gaussian
 
 BrokenDimension = Literal["wann", "wo", "wie_viel", "vorbedingung"]
 GoalStatus = Literal["on_track", "at_risk", "broken", "cancelled"]
@@ -237,7 +249,10 @@ class MetaCoreEngine:
         predicted = [
             s
             for s in self.repo.list_states(
-                entity_id=goal.entity_id, property_name=goal.property_name, modality="predicted"
+                entity_id=goal.entity_id,
+                property_name=goal.property_name,
+                modality="predicted",
+                context_filter=goal.context or None,
             )
         ]
         for pred in predicted:
@@ -276,7 +291,10 @@ class MetaCoreEngine:
         # Fallback: direct edge attached to the goal itself or latest observed state
         goal_edges = self.repo.list_edges(state_id=goal.id, direction="out")
         observed = self.repo.list_states(
-            entity_id=goal.entity_id, property_name=goal.property_name, modality="observed"
+            entity_id=goal.entity_id,
+            property_name=goal.property_name,
+            modality="observed",
+            context_filter=goal.context or None,
         )
         latest_obs = observed[-1] if observed else None
         if goal_edges:
@@ -304,11 +322,22 @@ class MetaCoreEngine:
         # 1. Quantity / property value ("wie_viel")
         if goal.target_min is not None or goal.target_max is not None:
             if pred is not None and pred.value_num is not None:
-                p_qty = probability_in_bounds(
-                    GaussianValue(pred.value_num, pred.value_sigma or 0.0),
-                    target_min=goal.target_min,
-                    target_max=goal.target_max,
+                pred_val = GaussianValue(
+                    pred.value_num,
+                    pred.value_sigma or 0.0,
+                    source=pred.source,
+                    unit=pred.value_unit,
                 )
+                try:
+                    if goal.value_unit and pred_val.unit:
+                        pred_val = convert_gaussian_value(pred_val, goal.value_unit)
+                    p_qty = probability_in_bounds(
+                        pred_val,
+                        target_min=goal.target_min,
+                        target_max=goal.target_max,
+                    )
+                except UnitCompatibilityError:
+                    p_qty = 0.0
             else:
                 p_qty = 0.0
             dim_probs["wie_viel"] = p_qty
@@ -365,7 +394,8 @@ class MetaCoreEngine:
         if p_pre < goal.threshold_fail:
             broken.append("vorbedingung")
 
-        combined = combine_goal_probability(list(dim_probs.values()))
+        path_conf = pred.assertion_confidence if pred is not None else 1.0
+        combined = combine_goal_probability(list(dim_probs.values()), path_success_prob=path_conf)
         return combined, dim_probs, broken
 
     def _is_ancestor_tx(self, maybe_ancestor_id: str, node_id: str) -> bool:
@@ -477,11 +507,15 @@ class MetaCoreEngine:
         property_name: str | None,
         in_states: Sequence[State],
         default_entity_id: str | None,
+        match_context: dict[str, str] | None = None,
     ) -> list[State]:
         candidates: list[State] = []
         if entity_id and property_name:
             candidates = self.repo.list_states(
-                entity_id=entity_id, property_name=property_name, modality="observed"
+                entity_id=entity_id,
+                property_name=property_name,
+                modality="observed",
+                context_filter=match_context,
             )
         elif category and property_name:
             matching_ent_ids = {
@@ -491,17 +525,26 @@ class MetaCoreEngine:
             }
             candidates = [
                 st
-                for st in self.repo.list_states(property_name=property_name, modality="observed")
+                for st in self.repo.list_states(
+                    property_name=property_name,
+                    modality="observed",
+                    context_filter=match_context,
+                )
                 if st.entity_id in matching_ent_ids
             ]
 
         if not candidates:
             for st in in_states:
-                if (entity_id is None or st.entity_id == entity_id) and (
-                    property_name is None or st.property_name == property_name
+                if (
+                    (entity_id is None or st.entity_id == entity_id)
+                    and (property_name is None or st.property_name == property_name)
+                    and context_matches(st.context, match_context)
                 ):
                     obs_for_ent = self.repo.list_states(
-                        entity_id=st.entity_id, property_name=st.property_name, modality="observed"
+                        entity_id=st.entity_id,
+                        property_name=st.property_name,
+                        modality="observed",
+                        context_filter=match_context,
                     )
                     if obs_for_ent:
                         candidates.extend(obs_for_ent)
@@ -512,12 +555,21 @@ class MetaCoreEngine:
             target_ent = entity_id or default_entity_id
             if target_ent:
                 candidates = self.repo.list_states(
-                    entity_id=target_ent, property_name=property_name, modality="observed"
+                    entity_id=target_ent,
+                    property_name=property_name,
+                    modality="observed",
+                    context_filter=match_context,
                 )
             if not candidates and entity_id is None:
-                candidates = self.repo.list_states(property_name=property_name, modality="observed")
+                candidates = self.repo.list_states(
+                    property_name=property_name,
+                    modality="observed",
+                    context_filter=match_context,
+                )
 
-        deduped: dict[str, State] = {st.id: st for st in candidates}
+        deduped: dict[str, State] = {
+            st.id: st for st in candidates if context_matches(st.context, match_context)
+        }
         return sorted(
             deduped.values(),
             key=lambda s: (
@@ -534,6 +586,7 @@ class MetaCoreEngine:
         property_name: str | None,
         in_states: Sequence[State],
         default_entity_id: str | None = None,
+        match_context: dict[str, str] | None = None,
     ) -> State | None:
         candidates = [
             st
@@ -543,6 +596,7 @@ class MetaCoreEngine:
                 property_name=property_name,
                 in_states=in_states,
                 default_entity_id=default_entity_id,
+                match_context=match_context,
             )
             if st.value_num is not None
         ]
@@ -555,34 +609,158 @@ class MetaCoreEngine:
         in_states: Sequence[State],
         default_entity_id: str | None,
     ) -> float:
+        base_ctx = cond.get("match_context")
         num_state = self._resolve_latest_numeric_state(
             entity_id=cond.get("numerator_entity_id"),
             property_name=cond.get("numerator_property"),
             in_states=in_states,
             default_entity_id=default_entity_id,
+            match_context=cond.get("numerator_context", base_ctx),
         )
         den_state = self._resolve_latest_numeric_state(
             entity_id=cond.get("denominator_entity_id"),
             property_name=cond.get("denominator_property"),
             in_states=in_states,
             default_entity_id=default_entity_id,
+            match_context=cond.get("denominator_context", base_ctx),
         )
         if num_state is None or den_state is None or num_state.value_num is None or den_state.value_num is None:
             return 0.0
-        if abs(den_state.value_num) < 1e-12:
+
+        num_g = GaussianValue(
+            num_state.value_num,
+            num_state.value_sigma or 0.0,
+            source=num_state.source,
+            unit=num_state.value_unit,
+        )
+        den_g = GaussianValue(
+            den_state.value_num,
+            den_state.value_sigma or 0.0,
+            source=den_state.source,
+            unit=den_state.value_unit,
+        )
+        if (
+            num_g.unit
+            and den_g.unit
+            and num_g.unit != den_g.unit
+            and are_units_compatible(num_g.unit, den_g.unit)
+        ):
+            num_g = convert_gaussian_value(num_g, den_g.unit)
+
+        if abs(den_g.mean) < 1e-12:
             return 0.0
 
-        ratio = propagate_ratio(
-            GaussianValue(num_state.value_num, num_state.value_sigma or 0.0, source=num_state.source),
-            GaussianValue(den_state.value_num, den_state.value_sigma or 0.0, source=den_state.source),
-        )
+        ratio = propagate_ratio(num_g, den_g)
         min_ratio = cond.get("min_ratio", cond.get("min_value"))
         max_ratio = cond.get("max_ratio", cond.get("max_value"))
-        return probability_in_bounds(
+        p_ratio = probability_in_bounds(
             ratio,
             target_min=float(min_ratio) if min_ratio is not None else None,
             target_max=float(max_ratio) if max_ratio is not None else None,
         )
+        return max(
+            0.0,
+            min(1.0, p_ratio * min(num_state.assertion_confidence, den_state.assertion_confidence)),
+        )
+
+    def _evaluate_forbid_coexistence(
+        self,
+        cond: dict[str, Any],
+        *,
+        in_states: Sequence[State],
+        ref_time_ms: int | None,
+        default_entity_id: str | None,
+        default_category: str | None,
+    ) -> float:
+        items = list(cond.get("items", []))
+        if not items and cond.get("a") is not None and cond.get("b") is not None:
+            items = [cond["a"], cond["b"]]
+        if len(items) < 2:
+            return 1.0
+
+        probs: list[float] = []
+        latest_states: list[State | None] = []
+        for item in items:
+            item_prob = self._evaluate_condition(
+                item,
+                in_states=in_states,
+                ref_time_ms=ref_time_ms,
+                default_entity_id=default_entity_id,
+                default_category=default_category,
+            )
+            probs.append(item_prob)
+            if item.get("kind") in ("ratio", "period_phase", "forbid_coexistence"):
+                latest_states.append(None)
+            else:
+                latest_states.append(
+                    self._resolve_latest_numeric_or_any_state(
+                        item,
+                        in_states=in_states,
+                        default_entity_id=default_entity_id,
+                        default_category=default_category,
+                    )
+                )
+
+        radius_raw = cond.get("same_location_radius_meters")
+        if radius_raw is not None:
+            radius_m = float(radius_raw)
+            none_coexist = 1.0
+            for i in range(len(probs)):
+                for j in range(i + 1, len(probs)):
+                    spatial_p = 1.0
+                    st_a = latest_states[i]
+                    st_b = latest_states[j]
+                    if (
+                        st_a is not None
+                        and st_b is not None
+                        and st_a.lat is not None
+                        and st_a.lon is not None
+                        and st_b.lat is not None
+                        and st_b.lon is not None
+                    ):
+                        comb_sigma = math.hypot(st_a.sigma_meters or 1.0, st_b.sigma_meters or 1.0)
+                        spatial_p = probability_within_radius(
+                            GeoPoint(st_a.lat, st_a.lon, comb_sigma),
+                            st_b.lat,
+                            st_b.lon,
+                            radius_m,
+                        )
+                    pair_p = probs[i] * probs[j] * spatial_p
+                    none_coexist *= 1.0 - max(0.0, min(1.0, pair_p))
+            p_coexist = 1.0 - none_coexist
+        else:
+            p_zero = 1.0
+            for p in probs:
+                p_zero *= 1.0 - p
+            p_one = 0.0
+            for i, p in enumerate(probs):
+                others = 1.0
+                for j, q in enumerate(probs):
+                    if i != j:
+                        others *= 1.0 - q
+                p_one += p * others
+            p_coexist = 1.0 - p_zero - p_one
+
+        p_coexist = max(0.0, min(1.0, p_coexist))
+        return max(0.0, min(1.0, 1.0 - p_coexist))
+
+    def _resolve_latest_numeric_or_any_state(
+        self,
+        cond: dict[str, Any],
+        *,
+        in_states: Sequence[State],
+        default_entity_id: str | None,
+        default_category: str | None,
+    ) -> State | None:
+        cands = self._resolve_observed_candidates(
+            entity_id=cond.get("entity_id"),
+            category=cond.get("category", default_category),
+            property_name=cond.get("property_name"),
+            in_states=in_states,
+            default_entity_id=default_entity_id,
+            match_context=cond.get("match_context"),
+        )
+        return cands[-1] if cands else None
 
     def _evaluate_condition(
         self,
@@ -596,6 +774,14 @@ class MetaCoreEngine:
         if cond.get("kind") == "ratio":
             return self._evaluate_ratio_condition(
                 cond, in_states=in_states, default_entity_id=default_entity_id
+            )
+        if cond.get("kind") == "forbid_coexistence":
+            return self._evaluate_forbid_coexistence(
+                cond,
+                in_states=in_states,
+                ref_time_ms=ref_time_ms,
+                default_entity_id=default_entity_id,
+                default_category=default_category,
             )
         if cond.get("kind") == "period_phase":
             use_time = ref_time_ms
@@ -626,6 +812,7 @@ class MetaCoreEngine:
             property_name=cond.get("property_name"),
             in_states=in_states,
             default_entity_id=default_entity_id,
+            match_context=cond.get("match_context"),
         )
         if not candidates:
             return 0.0
@@ -656,22 +843,49 @@ class MetaCoreEngine:
         min_val = cond.get("min_value")
         max_val = cond.get("max_value")
         if min_val is not None or max_val is not None:
-            numeric_samples = [
-                GaussianValue(st.value_num, st.value_sigma or 0.0, source=st.source)
-                for st in candidates
-                if st.value_num is not None
-            ]
+            cond_unit = cond.get("unit")
+            numeric_samples: list[GaussianValue] = []
+            used_confidences: list[float] = []
+            for st in candidates:
+                if st.value_num is None:
+                    continue
+                gv = GaussianValue(
+                    st.value_num,
+                    st.value_sigma or 0.0,
+                    source=st.source,
+                    unit=st.value_unit,
+                )
+                if cond_unit:
+                    try:
+                        gv = convert_gaussian_value(gv, str(cond_unit))
+                    except UnitCompatibilityError:
+                        continue
+                numeric_samples.append(gv)
+                used_confidences.append(st.assertion_confidence)
             if not numeric_samples:
                 return 0.0
             agg_mode: SeriesAggregation = str(cond.get("aggregation", "latest"))  # type: ignore[assignment]
-            aggregated = aggregate_series(numeric_samples, agg_mode)
-            return probability_in_bounds(
+            try:
+                aggregated = aggregate_series(
+                    numeric_samples,
+                    agg_mode,
+                    target_unit=str(cond_unit) if cond_unit else None,
+                )
+            except UnitCompatibilityError:
+                return 0.0
+            p_bounds = probability_in_bounds(
                 aggregated,
                 target_min=float(min_val) if min_val is not None else None,
                 target_max=float(max_val) if max_val is not None else None,
             )
+            eff_conf = (
+                used_confidences[-1]
+                if agg_mode == "latest"
+                else min(used_confidences)
+            )
+            return max(0.0, min(1.0, p_bounds * eff_conf))
 
-        return 1.0
+        return latest_state.assertion_confidence
 
     def _evaluate_condition_group(
         self,
@@ -805,13 +1019,16 @@ class MetaCoreEngine:
         input_roles = formula.get("input_roles")
         if isinstance(input_roles, dict):
             props.update(str(k) for k in input_roles)
-        for key in ("ingredients", "guards", "ratio_guards", "modifiers"):
+        for key in ("ingredients", "guards", "ratio_guards", "modifiers", "inflows", "outflows"):
             for item in formula.get(key, []):
                 if not isinstance(item, dict):
                     continue
                 for prop_key in ("property_name", "numerator_property", "denominator_property"):
                     if item.get(prop_key):
                         props.add(str(item[prop_key]))
+                for sub_item in item.get("items", []):
+                    if isinstance(sub_item, dict) and sub_item.get("property_name"):
+                        props.add(str(sub_item["property_name"]))
         return props
 
     def _rollup_composite_tx(self, parent_tx_id: str) -> None:
@@ -879,6 +1096,7 @@ class MetaCoreEngine:
         modifiers: Sequence[dict[str, Any]],
         inputs: Sequence[State],
     ) -> tuple[float | None, float | None]:
+        out_unit = str(formula.get("output_unit", primary_in.value_unit))
         inherit_val = bool(formula.get("inherit_input_value", False))
         raw_out_val = None if inherit_val else formula.get("output_value")
         raw_out_sig = None if inherit_val else formula.get("output_sigma")
@@ -888,7 +1106,10 @@ class MetaCoreEngine:
                 primary_in.value_num,
                 primary_in.value_sigma or 0.0,
                 source=primary_in.source,
+                unit=primary_in.value_unit,
             )
+            if out_unit and primary_in.value_unit and are_units_compatible(primary_in.value_unit, out_unit):
+                base_g = convert_gaussian_value(base_g, out_unit)
             if formula.get("scale_mean") is not None:
                 scaled = propagate_product(
                     base_g,
@@ -902,7 +1123,7 @@ class MetaCoreEngine:
                 out_sig: float | None = scaled.sigma
             else:
                 out_val = base_g.mean
-                out_sig = primary_in.value_sigma
+                out_sig = base_g.sigma if primary_in.value_sigma is not None else None
         else:
             out_val = float(raw_out_val) if raw_out_val is not None else primary_in.value_num
             out_sig = float(raw_out_sig) if raw_out_sig is not None else primary_in.value_sigma
@@ -1154,8 +1375,16 @@ class MetaCoreEngine:
         if kind == "product_and_split" and primary_in.value_num is not None:
             factor_cfg = formula.get("factor", {"mean": 1.0, "sigma": 0.0, "source": "ai_prior"})
             factor_source = factor_cfg.get("source", "ai_prior")
+            in_g = GaussianValue(
+                primary_in.value_num,
+                primary_in.value_sigma or 0.0,
+                source=primary_in.source,
+                unit=primary_in.value_unit,
+            )
+            if out_unit and primary_in.value_unit and are_units_compatible(primary_in.value_unit, out_unit):
+                in_g = convert_gaussian_value(in_g, out_unit)
             total = propagate_product(
-                GaussianValue(primary_in.value_num, primary_in.value_sigma or 0.0, source=primary_in.source),
+                in_g,
                 GaussianValue(float(factor_cfg["mean"]), float(factor_cfg["sigma"]), source=factor_source),
             )
             mod_total, _, _ = self._apply_modifiers(
@@ -1203,6 +1432,75 @@ class MetaCoreEngine:
                     out_entity_id=out_entity_id,
                     out_prop=out_prop,
                     out_unit=out_unit,
+                    total=mod_total,
+                    total_source="ai_prior" if mod_total.source == "ai_prior" else "derived",
+                    out_time_ms=out_time_ms,
+                    out_time_sigma=out_time_sigma,
+                    split_parts=split_parts,
+                    split_entities=split_entities,
+                    branch_key=branch_key,
+                    extra_meta=extra_meta,
+                )
+            )
+        elif kind == "decay_step" and primary_in.value_num is not None:
+            raw_total = self._compute_decay_step(
+                formula=formula,
+                primary_in=primary_in,
+                out_unit=out_unit,
+                dur_s=dur_s,
+                dur_sigma_s=dur_sigma_s,
+            )
+            mod_total, _, _ = self._apply_modifiers(
+                output_value=raw_total,
+                duration_seconds=None,
+                duration_sigma_seconds=None,
+                modifiers=modifiers,
+                inputs=inputs,
+            )
+            assert mod_total is not None
+            created_state_ids.extend(
+                self._emit_total_and_split_outputs(
+                    template=template,
+                    planned_tx=planned_tx,
+                    formula=formula,
+                    primary_in=primary_in,
+                    out_entity_id=out_entity_id,
+                    out_prop=out_prop,
+                    out_unit=out_unit or mod_total.unit,
+                    total=mod_total,
+                    total_source="ai_prior" if mod_total.source == "ai_prior" else "derived",
+                    out_time_ms=out_time_ms,
+                    out_time_sigma=out_time_sigma,
+                    split_parts=split_parts,
+                    split_entities=split_entities,
+                    branch_key=branch_key,
+                )
+            )
+        elif kind == "cumulative_balance":
+            raw_total, extra_meta = self._compute_cumulative_balance(
+                formula=formula,
+                inputs=inputs,
+                primary_in=primary_in,
+                out_unit=out_unit,
+                ref_time_ms=out_time_ms,
+            )
+            mod_total, _, _ = self._apply_modifiers(
+                output_value=raw_total,
+                duration_seconds=None,
+                duration_sigma_seconds=None,
+                modifiers=modifiers,
+                inputs=inputs,
+            )
+            assert mod_total is not None
+            created_state_ids.extend(
+                self._emit_total_and_split_outputs(
+                    template=template,
+                    planned_tx=planned_tx,
+                    formula=formula,
+                    primary_in=primary_in,
+                    out_entity_id=out_entity_id,
+                    out_prop=out_prop,
+                    out_unit=out_unit or mod_total.unit,
                     total=mod_total,
                     total_source="ai_prior" if mod_total.source == "ai_prior" else "derived",
                     out_time_ms=out_time_ms,
@@ -1274,11 +1572,24 @@ class MetaCoreEngine:
                 entity_id=mod_spec.get("entity_id"),
                 property_name=mod_spec.get("property_name"),
                 in_states=inputs,
+                match_context=mod_spec.get("match_context"),
             )
             if st is None or st.value_num is None:
                 continue
+            mod_obs = GaussianValue(
+                st.value_num,
+                st.value_sigma or 0.0,
+                source=st.source,
+                unit=st.value_unit,
+            )
+            mod_unit = mod_spec.get("unit")
+            if mod_unit:
+                try:
+                    mod_obs = convert_gaussian_value(mod_obs, str(mod_unit))
+                except UnitCompatibilityError:
+                    continue
             factor = compute_modifier_factor(
-                GaussianValue(st.value_num, st.value_sigma or 0.0, source=st.source),
+                mod_obs,
                 optimal_min=float(mod_spec["optimal_min"]),
                 optimal_max=float(mod_spec["optimal_max"]),
                 falloff_per_unit=float(mod_spec["falloff_per_unit"]),
@@ -1306,11 +1617,14 @@ class MetaCoreEngine:
         def _match_input(spec: dict[str, Any]) -> State:
             prop = str(spec["property_name"])
             ent_id = spec.get("entity_id")
+            req_ctx = spec.get("match_context")
             st = next(
                 (
                     item
                     for item in inputs
-                    if item.property_name == prop and (ent_id is None or item.entity_id == ent_id)
+                    if item.property_name == prop
+                    and (ent_id is None or item.entity_id == ent_id)
+                    and context_matches(item.context, req_ctx)
                 ),
                 None,
             )
@@ -1320,21 +1634,61 @@ class MetaCoreEngine:
 
         mode = str(formula.get("mode", "weighted_sum"))
         if mode == "weighted_sum":
-            terms = [
-                (
-                    GaussianValue(
-                        st.value_num, st.value_sigma or 0.0, source=st.source  # type: ignore[arg-type]
-                    ),
-                    GaussianValue(
-                        float(spec.get("weight", 1.0)),
-                        float(spec.get("weight_sigma", 0.0)),
-                        source=spec.get("source", "derived"),
-                    ),
+            out_unit_raw = str(formula.get("output_unit", "") or "")
+            terms: list[tuple[GaussianValue, GaussianValue]] = []
+            for spec in ingredients:
+                st = _match_input(spec)
+                assert st.value_num is not None
+                gv = GaussianValue(
+                    st.value_num,
+                    st.value_sigma or 0.0,
+                    source=st.source,
+                    unit=st.value_unit,
                 )
-                for spec in ingredients
-                if (st := _match_input(spec)) is not None
+                spec_unit = spec.get("unit")
+                if spec_unit:
+                    gv = convert_gaussian_value(gv, str(spec_unit))
+                elif out_unit_raw and st.value_unit and are_units_compatible(st.value_unit, out_unit_raw):
+                    gv = convert_gaussian_value(gv, out_unit_raw)
+                terms.append(
+                    (
+                        gv,
+                        GaussianValue(
+                            float(spec.get("weight", 1.0)),
+                            float(spec.get("weight_sigma", 0.0)),
+                            source=spec.get("source", "derived"),
+                        ),
+                    )
+                )
+            non_empty_units = [gv.unit for gv, _ in terms if gv.unit]
+            all_compatible = all(
+                are_units_compatible(non_empty_units[0], u) for u in non_empty_units[1:]
+            ) if non_empty_units else True
+            if all_compatible:
+                can_target = (
+                    out_unit_raw
+                    if (not non_empty_units or not out_unit_raw or are_units_compatible(non_empty_units[0], out_unit_raw))
+                    else None
+                )
+                return propagate_linear_combination(terms, target_unit=can_target), {}
+            # Heterogeneous ingredient dimensions (weights carry dimensional conversion to output_unit)
+            dimensionless_terms = [
+                (
+                    GaussianValue(v.mean, v.sigma, source=v.source, measurement_source=v.measurement_source),
+                    w,
+                )
+                for v, w in terms
             ]
-            return propagate_linear_combination(terms), {}
+            combined = propagate_linear_combination(dimensionless_terms)
+            return (
+                GaussianValue(
+                    combined.mean,
+                    combined.sigma,
+                    source=combined.source,
+                    unit=out_unit_raw,
+                ),
+                {},
+            )
 
         if mode == "limiting_factor":
             caps: list[tuple[str, GaussianValue]] = []
@@ -1343,10 +1697,18 @@ class MetaCoreEngine:
                 if per_unit is None or float(per_unit) <= 0.0:
                     continue
                 st = _match_input(spec)
+                assert st.value_num is not None
+                gv = GaussianValue(
+                    st.value_num,
+                    st.value_sigma or 0.0,
+                    source=st.source,
+                    unit=st.value_unit,
+                )
+                spec_unit = spec.get("unit")
+                if spec_unit:
+                    gv = convert_gaussian_value(gv, str(spec_unit))
                 cap = propagate_ratio(
-                    GaussianValue(
-                        st.value_num, st.value_sigma or 0.0, source=st.source  # type: ignore[arg-type]
-                    ),
+                    gv,
                     GaussianValue(float(per_unit), 0.0, source="derived"),
                 )
                 caps.append((str(spec["property_name"]), cap))
@@ -1361,6 +1723,178 @@ class MetaCoreEngine:
             return propagate_product(bottleneck_cap, unit_out), {"limiting_ingredient": bottleneck_prop}
 
         raise ValueError(f"Unbekannter recipe_mix Modus: {mode}")
+
+    @staticmethod
+    def _parse_gaussian_param(
+        raw: Any,
+        *,
+        default_mean: float = 0.0,
+        default_sigma: float = 0.0,
+        default_source: Any = "derived",
+        default_unit: str = "",
+    ) -> GaussianValue:
+        if raw is None:
+            return GaussianValue(default_mean, default_sigma, source=default_source, unit=default_unit)
+        if isinstance(raw, (int, float)):
+            return GaussianValue(float(raw), default_sigma, source=default_source, unit=default_unit)
+        if isinstance(raw, dict):
+            return GaussianValue(
+                float(raw.get("mean", default_mean)),
+                float(raw.get("sigma", default_sigma)),
+                source=raw.get("source", default_source),
+                unit=str(raw.get("unit", default_unit)),
+            )
+        raise ValueError(f"Ungültiger Parameter-Wert: {raw!r}")
+
+    def _compute_decay_step(
+        self,
+        *,
+        formula: dict[str, Any],
+        primary_in: State,
+        out_unit: str,
+        dur_s: float,
+        dur_sigma_s: float | None,
+    ) -> GaussianValue:
+        if primary_in.value_num is None:
+            raise ValueError("decay_step erfordert numerischen Input-Zustand")
+        init_g = GaussianValue(
+            primary_in.value_num,
+            primary_in.value_sigma or 0.0,
+            source=primary_in.source,
+            unit=primary_in.value_unit,
+        )
+        if out_unit and primary_in.value_unit and are_units_compatible(primary_in.value_unit, out_unit):
+            init_g = convert_gaussian_value(init_g, out_unit)
+        eq_g = self._parse_gaussian_param(
+            formula.get("equilibrium"),
+            default_mean=0.0,
+            default_sigma=0.0,
+            default_source="derived",
+            default_unit=init_g.unit or out_unit,
+        )
+        if formula.get("tau_seconds") is not None:
+            tau_g = self._parse_gaussian_param(
+                formula["tau_seconds"], default_source="ai_prior"
+            )
+        elif formula.get("half_life_seconds") is not None:
+            hl_g = self._parse_gaussian_param(
+                formula["half_life_seconds"], default_source="ai_prior"
+            )
+            ln2 = math.log(2.0)
+            tau_g = GaussianValue(hl_g.mean / ln2, hl_g.sigma / ln2, source=hl_g.source)
+        else:
+            raise ValueError("decay_step erfordert formula['tau_seconds'] oder formula['half_life_seconds']")
+
+        dt_s = float(formula["dt_seconds"]) if formula.get("dt_seconds") is not None else float(dur_s)
+        dt_sig = (
+            float(formula["dt_sigma_seconds"])
+            if formula.get("dt_sigma_seconds") is not None
+            else float(dur_sigma_s or 0.0)
+        )
+        return propagate_exponential_decay(init_g, eq_g, dt_s, tau_g, dt_sigma_seconds=dt_sig)
+
+    def _compute_cumulative_balance(
+        self,
+        *,
+        formula: dict[str, Any],
+        inputs: Sequence[State],
+        primary_in: State,
+        out_unit: str,
+        ref_time_ms: int,
+    ) -> tuple[GaussianValue, dict[str, Any]]:
+        window_seconds = formula.get("window_seconds")
+        cutoff_ms = (
+            ref_time_ms - int(float(window_seconds) * 1000)
+            if window_seconds is not None
+            else None
+        )
+
+        flows: list[tuple[GaussianValue, float]] = []
+        used_state_ids: set[str] = set()
+        inflow_total = 0.0
+        outflow_total = 0.0
+        target_u = str(formula.get("output_unit", out_unit)) or None
+
+        for sign, key in ((1.0, "inflows"), (-1.0, "outflows")):
+            for spec in formula.get(key, []):
+                if not isinstance(spec, dict) or not spec.get("property_name"):
+                    continue
+                prop = str(spec["property_name"])
+                ent_id = spec.get("entity_id")
+                req_ctx = spec.get("match_context")
+                weight = float(spec.get("weight", 1.0))
+
+                matching: dict[str, State] = {}
+                for st in inputs:
+                    if (
+                        st.property_name == prop
+                        and st.value_num is not None
+                        and (ent_id is None or st.entity_id == ent_id)
+                        and context_matches(st.context, req_ctx)
+                        and (cutoff_ms is None or (st.time_ms is not None and cutoff_ms <= st.time_ms <= ref_time_ms))
+                    ):
+                        matching[st.id] = st
+                if cutoff_ms is not None or not matching:
+                    for st in self.repo.list_states(
+                        entity_id=ent_id or primary_in.entity_id,
+                        property_name=prop,
+                        modality="observed",
+                        context_filter=req_ctx,
+                    ):
+                        if st.value_num is None:
+                            continue
+                        if cutoff_ms is not None and (
+                            st.time_ms is None or not (cutoff_ms <= st.time_ms <= ref_time_ms)
+                        ):
+                            continue
+                        matching[st.id] = st
+
+                ordered = sorted(
+                    matching.values(),
+                    key=lambda s: (s.time_ms if s.time_ms is not None else s.created_at_ms, s.id),
+                )
+                for st in ordered:
+                    assert st.value_num is not None
+                    used_state_ids.add(st.id)
+                    gv = GaussianValue(
+                        st.value_num,
+                        st.value_sigma or 0.0,
+                        source=st.source,
+                        unit=st.value_unit,
+                    )
+                    spec_u = spec.get("unit") or target_u
+                    if spec_u and gv.unit:
+                        gv = convert_gaussian_value(gv, str(spec_u))
+                    flows.append((gv, sign * weight))
+                    if sign > 0:
+                        inflow_total += gv.mean * weight
+                    else:
+                        outflow_total += gv.mean * weight
+
+        include_initial = bool(formula.get("include_initial", True))
+        initial_g: GaussianValue | None = None
+        if include_initial and primary_in.value_num is not None and primary_in.id not in used_state_ids:
+            initial_g = GaussianValue(
+                primary_in.value_num,
+                primary_in.value_sigma or 0.0,
+                source=primary_in.source,
+                unit=primary_in.value_unit,
+            )
+
+        min_clamp = float(formula["min_clamp"]) if formula.get("min_clamp") is not None else None
+        max_clamp = float(formula["max_clamp"]) if formula.get("max_clamp") is not None else None
+        balance = propagate_cumulative_balance(
+            flows,
+            initial=initial_g,
+            min_clamp=min_clamp,
+            max_clamp=max_clamp,
+            target_unit=target_u,
+        )
+        return balance, {
+            "inflow_total": inflow_total,
+            "outflow_total": outflow_total,
+            "flow_count": len(flows),
+        }
 
     def _emit_total_and_split_outputs(
         self,
@@ -1509,12 +2043,21 @@ class MetaCoreEngine:
                 template = self.repo.get_transformation(tx.template_id)
                 factor_cfg = (template.formula if template else tx.formula).get("factor")
                 if factor_cfg is not None:
-                    obs_factor = obs.value_num / primary_in.value_num
-                    obs_factor_sigma = max(
-                        1e-4,
-                        (obs.value_sigma if obs.value_sigma is not None else max(1.0, obs.value_num * 0.02))
-                        / primary_in.value_num,
+                    obs_for_cal = GaussianValue(
+                        obs.value_num,
+                        obs.value_sigma if obs.value_sigma is not None else max(1.0, obs.value_num * 0.02),
+                        source="measured",
+                        measurement_source=obs.measurement_source,
+                        unit=obs.value_unit,
                     )
+                    if (
+                        primary_in.value_unit
+                        and obs.value_unit
+                        and are_units_compatible(obs.value_unit, primary_in.value_unit)
+                    ):
+                        obs_for_cal = convert_gaussian_value(obs_for_cal, primary_in.value_unit)
+                    obs_factor = obs_for_cal.mean / primary_in.value_num
+                    obs_factor_sigma = max(1e-4, obs_for_cal.sigma / primary_in.value_num)
                     calibrated = calibrate_parameter(
                         GaussianValue(
                             float(factor_cfg["mean"]),
@@ -1551,6 +2094,7 @@ class MetaCoreEngine:
                         obs.value_num,
                         obs.value_sigma if obs.value_sigma is not None else 0.0,
                         source="measured",
+                        unit=obs.value_unit,
                     )
                     parts_count = len(split_edges)
                     if parts_count > 0:
@@ -1559,9 +2103,16 @@ class MetaCoreEngine:
                         for sp_edge in split_edges:
                             part_st = self.repo.get_state(sp_edge.state_id)
                             if part_st is not None:
+                                adj_part = per_part
+                                if (
+                                    part_st.value_unit
+                                    and per_part.unit
+                                    and are_units_compatible(per_part.unit, part_st.value_unit)
+                                ):
+                                    adj_part = convert_gaussian_value(per_part, part_st.value_unit)
                                 upd_part_fields: dict[str, Any] = {
-                                    "value_num": per_part.mean,
-                                    "value_sigma": per_part.sigma,
+                                    "value_num": adj_part.mean,
+                                    "value_sigma": adj_part.sigma,
                                     "source": "derived",
                                 }
                                 if obs.time_ms is not None:
@@ -1572,6 +2123,94 @@ class MetaCoreEngine:
                                 if upd.id not in updated_state_ids:
                                     updated_state_ids.append(upd.id)
 
+            elif tx.formula.get("kind") == "decay_step" and obs.value_num is not None:
+                decay_in = primary_in or next((s for s in in_states if s.value_num is not None), None)
+                start_ms_ref = tx.meta.get("scheduled_start_ms")
+                if start_ms_ref is None and decay_in is not None and decay_in.time_ms is not None:
+                    start_ms_ref = decay_in.time_ms
+                dt_s = (
+                    (obs.time_ms - int(start_ms_ref)) / 1000.0
+                    if obs.time_ms is not None and start_ms_ref is not None
+                    else float(tx.formula.get("dt_seconds") or tx.duration_seconds or 0.0)
+                )
+                if decay_in is not None and decay_in.value_num is not None and dt_s > 0.0:
+                    template = self.repo.get_transformation(tx.template_id)
+                    src_formula = template.formula if template else tx.formula
+                    in_u = decay_in.value_unit
+                    eq_g = self._parse_gaussian_param(
+                        src_formula.get("equilibrium"),
+                        default_mean=0.0,
+                        default_sigma=0.0,
+                        default_unit=in_u,
+                    )
+                    if in_u and eq_g.unit and are_units_compatible(eq_g.unit, in_u):
+                        eq_g = convert_gaussian_value(eq_g, in_u)
+                    obs_g = GaussianValue(
+                        obs.value_num,
+                        obs.value_sigma
+                        if obs.value_sigma is not None
+                        else max(1e-3, abs(obs.value_num - eq_g.mean) * 0.02),
+                        source="measured",
+                        measurement_source=obs.measurement_source,
+                        unit=obs.value_unit,
+                    )
+                    if in_u and obs_g.unit and are_units_compatible(obs_g.unit, in_u):
+                        obs_g = convert_gaussian_value(obs_g, in_u)
+                    denom = decay_in.value_num - eq_g.mean
+                    num = obs_g.mean - eq_g.mean
+                    if abs(denom) > 1e-12:
+                        ratio = num / denom
+                        if 1e-4 < ratio < 1.0 - 1e-4:
+                            ln_r = math.log(ratio)
+                            tau_obs = -dt_s / ln_r
+                            d_tau_d_obs = dt_s / (max(1e-12, abs(num)) * (ln_r**2))
+                            tau_obs_sigma = max(1.0, obs_g.sigma * d_tau_d_obs)
+                            use_half_life = (
+                                src_formula.get("tau_seconds") is None
+                                and src_formula.get("half_life_seconds") is not None
+                            )
+                            if use_half_life:
+                                hl_g = self._parse_gaussian_param(
+                                    src_formula["half_life_seconds"], default_source="ai_prior"
+                                )
+                                ln2 = math.log(2.0)
+                                prior_tau = GaussianValue(
+                                    hl_g.mean / ln2, hl_g.sigma / ln2, source=hl_g.source
+                                )
+                            else:
+                                prior_tau = self._parse_gaussian_param(
+                                    src_formula.get("tau_seconds"),
+                                    default_mean=tau_obs,
+                                    default_sigma=max(60.0, tau_obs * 0.25),
+                                    default_source="ai_prior",
+                                )
+                            cal_tau = calibrate_parameter(
+                                prior_tau,
+                                [
+                                    GaussianValue(
+                                        tau_obs,
+                                        tau_obs_sigma,
+                                        source="measured",
+                                        measurement_source=obs.measurement_source,
+                                    )
+                                ],
+                            )
+                            new_param = {
+                                "mean": cal_tau.mean * math.log(2.0) if use_half_life else cal_tau.mean,
+                                "sigma": cal_tau.sigma * math.log(2.0) if use_half_life else cal_tau.sigma,
+                                "source": cal_tau.source,
+                            }
+                            param_key = "half_life_seconds" if use_half_life else "tau_seconds"
+                            if template is not None:
+                                tpl_formula = copy.deepcopy(template.formula)
+                                tpl_formula[param_key] = new_param
+                                self.repo.update_transformation(template.id, formula=tpl_formula)
+                                if template.id not in calibrated_ids:
+                                    calibrated_ids.append(template.id)
+                            tx_formula = copy.deepcopy(tx.formula)
+                            tx_formula[param_key] = new_param
+                            self.repo.update_transformation(tx.id, formula=tx_formula)
+
             # Update predicted output state across all formula kinds (value + time)
             for _, total_st in matching_total:
                 upd_total_fields: dict[str, Any] = {
@@ -1579,10 +2218,20 @@ class MetaCoreEngine:
                     "measurement_source": obs.measurement_source,
                 }
                 if obs.value_num is not None:
-                    upd_total_fields["value_num"] = obs.value_num
-                    upd_total_fields["value_sigma"] = (
+                    obs_mean, obs_sig = obs.value_num, (
                         obs.value_sigma if obs.value_sigma is not None else 0.0
                     )
+                    if (
+                        total_st.value_unit
+                        and obs.value_unit
+                        and are_units_compatible(obs.value_unit, total_st.value_unit)
+                    ):
+                        obs_mean, conv_sig = convert_gaussian(
+                            obs_mean, obs_sig, obs.value_unit, total_st.value_unit
+                        )
+                        obs_sig = conv_sig if conv_sig is not None else 0.0
+                    upd_total_fields["value_num"] = obs_mean
+                    upd_total_fields["value_sigma"] = obs_sig
                 if obs.time_ms is not None:
                     upd_total_fields["time_ms"] = obs.time_ms
                 if obs.sigma_seconds is not None:
@@ -1724,12 +2373,21 @@ class MetaCoreEngine:
                 mod_total: GaussianValue | None = None
                 if kind == "product_and_split" and primary_in.value_num is not None:
                     factor_cfg = tx.formula.get("factor", {"mean": 1.0, "sigma": 0.0, "source": "ai_prior"})
+                    out_unit_tx = str(tx.formula.get("output_unit", primary_in.value_unit))
+                    in_g = GaussianValue(
+                        primary_in.value_num,
+                        primary_in.value_sigma or 0.0,
+                        source=primary_in.source,
+                        unit=primary_in.value_unit,
+                    )
+                    if (
+                        out_unit_tx
+                        and primary_in.value_unit
+                        and are_units_compatible(primary_in.value_unit, out_unit_tx)
+                    ):
+                        in_g = convert_gaussian_value(in_g, out_unit_tx)
                     total = propagate_product(
-                        GaussianValue(
-                            primary_in.value_num,
-                            primary_in.value_sigma or 0.0,
-                            source=primary_in.source,
-                        ),
+                        in_g,
                         GaussianValue(
                             float(factor_cfg["mean"]),
                             float(factor_cfg["sigma"]),
@@ -1745,6 +2403,38 @@ class MetaCoreEngine:
                     )
                 elif kind == "recipe_mix":
                     raw_total, _ = self._compute_recipe_mix(tx.formula, in_states)
+                    mod_total, _, _ = self._apply_modifiers(
+                        output_value=raw_total,
+                        duration_seconds=None,
+                        duration_sigma_seconds=None,
+                        modifiers=modifiers,
+                        inputs=in_states,
+                    )
+                elif kind == "decay_step" and primary_in.value_num is not None:
+                    out_unit_tx = str(tx.formula.get("output_unit", primary_in.value_unit))
+                    raw_total = self._compute_decay_step(
+                        formula=tx.formula,
+                        primary_in=primary_in,
+                        out_unit=out_unit_tx,
+                        dur_s=dur_s,
+                        dur_sigma_s=mod_dur_sigma_s,
+                    )
+                    mod_total, _, _ = self._apply_modifiers(
+                        output_value=raw_total,
+                        duration_seconds=None,
+                        duration_sigma_seconds=None,
+                        modifiers=modifiers,
+                        inputs=in_states,
+                    )
+                elif kind == "cumulative_balance":
+                    out_unit_tx = str(tx.formula.get("output_unit", primary_in.value_unit))
+                    raw_total, _ = self._compute_cumulative_balance(
+                        formula=tx.formula,
+                        inputs=in_states,
+                        primary_in=primary_in,
+                        out_unit=out_unit_tx,
+                        ref_time_ms=out_time_ms,
+                    )
                     mod_total, _, _ = self._apply_modifiers(
                         output_value=raw_total,
                         duration_seconds=None,
@@ -1914,6 +2604,8 @@ class MetaCoreEngine:
                     cond.get("denominator_property"),
                 }
                 if obs.property_name not in props:
+                    continue
+                if not context_matches(obs.context, cond.get("match_context")):
                     continue
                 cat = cond.get("category", default_cat)
                 if cat is None or (obs_entity is not None and obs_entity.category == cat):
@@ -2116,6 +2808,104 @@ class MetaCoreEngine:
             summary=summary,
         )
 
+    def fuse_property_states(
+        self,
+        entity_id: str,
+        property_name: str,
+        *,
+        context_filter: dict[str, str] | None = None,
+        target_unit: str | None = None,
+        modality: StateModality = "observed",
+        require_same_context: bool | None = None,
+    ) -> GaussianValue:
+        """Fuse numeric states of a property with strict unit normalization and context isolation."""
+        states = [
+            st
+            for st in self.repo.list_states(
+                entity_id=entity_id,
+                property_name=property_name,
+                modality=modality,
+                context_filter=context_filter,
+            )
+            if st.value_num is not None
+        ]
+        if not states:
+            raise ValueError(
+                f"Keine numerischen '{modality}'-Zustände für ({entity_id}, {property_name}) gefunden."
+            )
+        vals = [
+            GaussianValue(
+                mean=st.value_num,  # type: ignore[arg-type]
+                sigma=st.value_sigma if st.value_sigma is not None else 0.0,
+                source=st.source,
+                measurement_source=st.measurement_source,
+                unit=st.value_unit,
+                context=make_context_key(st.context),
+            )
+            for st in states
+        ]
+        enforce_ctx = (context_filter is None) if require_same_context is None else require_same_context
+        return fuse_1d(vals, target_unit=target_unit, require_same_context=enforce_ctx)
+
+    # ------------------------------------------------------------------
+    # High-frequency raw time-series ingestion & roll-up
+    # ------------------------------------------------------------------
+
+    def ingest_raw_samples(self, samples: Sequence[RawSampleCreate]) -> list[RawSample]:
+        """Store high-frequency raw telemetry samples without polluting the causal graph."""
+        return self.repo.insert_raw_samples(samples)
+
+    def rollup_raw_samples(
+        self,
+        *,
+        entity_id: str | None = None,
+        property_name: str | None = None,
+        window_kind: RollupWindowKind = "day",
+        window_seconds: float = 3_600.0,
+        tz_name: str = "Europe/Berlin",
+        clock_id: ClockId = "solar_day",
+        phase_bins: int | None = None,
+        lat: float = 51.0,
+        lon: float = 10.0,
+        target_unit: str | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        only_unrolled: bool = True,
+        context_filter: dict[str, str] | None = None,
+    ) -> list[State]:
+        """Compress buffered raw_samples into observed graph States (one per context & time bucket)."""
+        samples = self.repo.list_raw_samples(
+            entity_id=entity_id,
+            property_name=property_name,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            only_unrolled=only_unrolled,
+            context_filter=context_filter,
+        )
+        if not samples:
+            return []
+
+        buckets = compute_rollup_buckets(
+            samples,
+            window_kind=window_kind,
+            window_seconds=window_seconds,
+            tz_name=tz_name,
+            clock_id=clock_id,
+            phase_bins=phase_bins,
+            lat=lat,
+            lon=lon,
+            target_unit=target_unit,
+        )
+        created_states: list[State] = []
+        for bucket, state_payload in buckets:
+            fb = self.record_observation(state_payload)
+            state_id = fb.created_state_ids[0]
+            self.repo.mark_raw_samples_rolled_up(bucket.sample_ids, state_id)
+            created = self.repo.get_state(state_id)
+            if created is not None:
+                created_states.append(created)
+        return created_states
+
     # ------------------------------------------------------------------
     # Multi-clock periodicity & interval analysis
     # ------------------------------------------------------------------
@@ -2126,6 +2916,7 @@ class MetaCoreEngine:
         entity_id: str | None = None,
         category: str | None = None,
         property_name: str | None = None,
+        context_filter: dict[str, str] | None = None,
         tz_name: str = "Europe/Berlin",
         now_ms_override: int | None = None,
         tidal_offset_hours: float = 0.0,
@@ -2143,6 +2934,7 @@ class MetaCoreEngine:
             entity_id=entity_id,
             property_name=property_name,
             modality="observed",
+            context_filter=context_filter,
         )
         samples: list[TimeSample] = []
         for st in states:
