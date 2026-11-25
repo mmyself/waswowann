@@ -210,7 +210,7 @@ def test_migration_on_pre_timeline_backup(config):
     migrate(config)
     migrate(config)
     with db(config) as conn:
-        assert conn.execute('PRAGMA user_version').fetchone()[0] == 5
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 6
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
         assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='fusion_groups'").fetchall()
         assert 'fused_group_id' not in {column['name'] for column in conn.execute('PRAGMA table_info(space_time_gauss)')}

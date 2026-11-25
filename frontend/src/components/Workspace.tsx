@@ -11,6 +11,7 @@ import ObservationList from "./ObservationList";
 import ObservationDetails from "./ObservationDetails";
 import ImportControls from "./ImportControls";
 import ZukunftsgraphPanel from "./ZukunftsgraphPanel";
+import ChatPanel from "./ChatPanel";
 
 const ObservationMap = dynamic(() => import("./ObservationMap"), { ssr: false, loading: () => <div className="map-loading"><span className="loading-orbit" />Karte wird vorbereitet …</div> });
 
@@ -20,7 +21,7 @@ export default function Workspace() {
   const [data, setData] = useState<ObservationListResponse | null>(null);
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [snapshot, setSnapshot] = useState<ZukunftsgraphSnapshot | null>(null);
-  const [viewMode, setViewMode] = useState<"map" | "graph" | "season">("map");
+  const [viewMode, setViewMode] = useState<"map" | "graph" | "season" | "chat">("map");
   const [focusedEntityId, setFocusedEntityId] = useState<string | null>(null);
   const [mode, setMode] = useState<FilterMode>("all");
   const [window, setWindow] = useState<TimeWindow | null>(null);
@@ -134,9 +135,10 @@ export default function Workspace() {
             <button type="button" role="tab" aria-selected={viewMode === "map"} className={viewMode === "map" ? "is-active" : ""} onClick={() => setViewMode("map")}>Karte &amp; Archiv</button>
             <button type="button" role="tab" aria-selected={viewMode === "graph"} className={viewMode === "graph" ? "is-active" : ""} onClick={() => setViewMode("graph")}>Zukunftsgraph{activeGoalCount > 0 ? ` (${activeGoalCount})` : ""}</button>
             <button type="button" role="tab" aria-selected={viewMode === "season"} className={viewMode === "season" ? "is-active" : ""} onClick={() => setViewMode("season")}>Perioden &amp; Jahr</button>
+            <button type="button" role="tab" aria-selected={viewMode === "chat"} className={viewMode === "chat" ? "is-active" : ""} onClick={() => setViewMode("chat")}>Chat &amp; Sprache</button>
           </div>
         )}
-        {loading && !data ? <div className="initial-loading"><span className="loading-orbit" />Archiv wird geöffnet …</div> : !data?.total ? <div className="first-run"><span className="first-run-number">01 / START</span><h2>Hier beginnt <em>dein Archiv.</em></h2><p>Lade eigene Bilder hoch, um Karte, Zeitschieber und Funddetails direkt zu nutzen.</p><a className="first-run-upload" href="/upload">Ersten Fund hochladen <span aria-hidden="true">↗</span></a></div> : viewMode === "map" ? <ObservationMap observations={visibleItems} selectedId={selectedVisible ? selectedId : null} onSelect={choose} selectedMedia={selectedVisible && detail?.id === selectedId ? detail?.media : undefined} draftLocation={draftLocation} onDraftLocationPick={pickDraftLocation} spatialPredictions={snapshot?.spatial_predictions} /> : <ZukunftsgraphPanel snapshot={snapshot} view={viewMode} focusedEntityId={focusedEntityId} onSnapshotChange={setSnapshot} onSelectObservation={selectFromGraph} />}
+        {loading && !data ? <div className="initial-loading"><span className="loading-orbit" />Archiv wird geöffnet …</div> : !data?.total ? <div className="first-run"><span className="first-run-number">01 / START</span><h2>Hier beginnt <em>dein Archiv.</em></h2><p>Lade eigene Bilder hoch, um Karte, Zeitschieber und Funddetails direkt zu nutzen.</p><a className="first-run-upload" href="/upload">Ersten Fund hochladen <span aria-hidden="true">↗</span></a></div> : viewMode === "map" ? <ObservationMap observations={visibleItems} selectedId={selectedVisible ? selectedId : null} onSelect={choose} selectedMedia={selectedVisible && detail?.id === selectedId ? detail?.media : undefined} draftLocation={draftLocation} onDraftLocationPick={pickDraftLocation} spatialPredictions={snapshot?.spatial_predictions} /> : viewMode === "chat" ? <ChatPanel scopeType="global" scopeId="global" mode="full" snapshot={snapshot} onSnapshotChange={setSnapshot} onRefreshObservations={reload} /> : <ZukunftsgraphPanel snapshot={snapshot} view={viewMode} focusedEntityId={focusedEntityId} onSnapshotChange={setSnapshot} onSelectObservation={selectFromGraph} />}
         {viewMode === "map" && <TimeFilter mode={mode} onModeChange={setMode} extent={timeExtent} window={window} onWindowChange={setWindow} visibleCount={visibleItems.length} totalCount={data?.total ?? 0} undatedCount={mode === "window" ? (data?.undated_count ?? 0) : 0} nowMs={snapshot?.now_ms} futurePredictionCount={snapshot?.spatial_predictions?.length ?? 0} />}
       </section>
       <div className="side-strand" ref={sideStrandRef}>

@@ -7,6 +7,7 @@ import { CATEGORIES, MediaItem, MediaMeasurementPatch, MergeCandidate, Observati
 import { DISPLAY_TIMEZONE, formatDate, formatDateSpan, formatPhotoDate, fromLocalInput, toLocalInput } from "@/lib/time-filter";
 import { formatMetaDate, goalStatusLabel } from "@/lib/zukunftsgraph";
 import AnalysisPanel from "./AnalysisPanel";
+import ChatPanel from "./ChatPanel";
 
 const MiniLocationPicker = dynamic(() => import("./MiniLocationPicker"), { ssr: false });
 const MANUAL_SIGMA_METERS = "5.3";
@@ -315,6 +316,18 @@ function DetailContent({ detail, onSave, onMeasurementsChanged, pickedDraftLocat
           </form>
         )}
       </section>}
+      <section className="detail-card entity-chat-card" aria-label="Chat und Sprache zu diesem Fund">
+        <ChatPanel
+          mode="compact"
+          scopeType="entity"
+          scopeId={id}
+          entityTitle={detail.title}
+          onSnapshotChange={onSnapshotChange}
+          onObservationUpdated={onSave}
+          onWorldlineChanged={() => { api.worldline(id).then(setWorldline).catch(() => {}); }}
+          onRefreshObservations={onMeasurementsChanged}
+        />
+      </section>
       {candidates.length > 0 && <section className="detail-card merge-candidates" aria-label="Nahe gelegene Funde zusammenführen">
         <div className="section-heading"><div><p className="eyebrow">Nahe gelegene Funde</p><h3>Dasselbe Objekt?</h3></div><span className="soon-badge">{candidates.length}</span></div>
         <p className="placeholder-copy">Führe nur Einträge zusammen, die wirklich dasselbe Objekt zeigen.</p>

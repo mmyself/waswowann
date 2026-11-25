@@ -446,3 +446,36 @@ export interface PeriodicityReport {
   best_clock_id?: ClockId | null;
   summary: string;
 }
+
+export type ChatScopeType = "global" | "entity";
+
+export interface ChatExecutedAction {
+  type: string;
+  ok: boolean;
+  summary: string;
+  details?: Record<string, unknown>;
+}
+
+export interface ChatMessage {
+  id: string;
+  scope_type: ChatScopeType;
+  scope_id: string;
+  role: "user" | "assistant";
+  content: string;
+  actions: ChatExecutedAction[];
+  created_at_ms: number;
+}
+
+export interface ChatHistoryResponse {
+  scope_type: ChatScopeType;
+  scope_id: string;
+  messages: ChatMessage[];
+}
+
+export interface ChatSendResponse {
+  user_message: ChatMessage;
+  assistant_message: ChatMessage;
+  executed_actions: ChatExecutedAction[];
+  snapshot: ZukunftsgraphSnapshot;
+  updated_observation: ObservationDetail | null;
+}

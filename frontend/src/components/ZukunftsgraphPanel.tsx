@@ -92,6 +92,15 @@ export default function ZukunftsgraphPanel({
   const [goalUnitDraft, setGoalUnitDraft] = useState("");
   const [goalEarliestDraft, setGoalEarliestDraft] = useState("");
   const [goalLatestDraft, setGoalLatestDraft] = useState("");
+  const [showNewGoalForm, setShowNewGoalForm] = useState(false);
+  const [newGoalEntityId, setNewGoalEntityId] = useState("");
+  const [newGoalLabel, setNewGoalLabel] = useState("");
+  const [newGoalProp, setNewGoalProp] = useState("harvest_ready");
+  const [newGoalUnit, setNewGoalUnit] = useState("g");
+  const [newGoalMin, setNewGoalMin] = useState("");
+  const [newGoalMax, setNewGoalMax] = useState("");
+  const [newGoalEarliest, setNewGoalEarliest] = useState("");
+  const [newGoalLatest, setNewGoalLatest] = useState("");
   const [periodPreset, setPeriodPreset] = useState<"archive" | "weekly" | "tidal" | "flush">("archive");
   const [customPeriodReport, setCustomPeriodReport] = useState<PeriodicityReport | null>(null);
   const [periodBusy, setPeriodBusy] = useState(false);
@@ -275,6 +284,56 @@ export default function ZukunftsgraphPanel({
       setEditingGoalId(null);
     } catch (cause) {
       setActionError(cause instanceof ApiError ? cause.message : "Ziel konnte nicht aktualisiert werden.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCreateNewGoal = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const fallbackEnt = snapshot.entities.find((e) => e.meta?.legacy_obs_id)?.id ?? snapshot.entities[0]?.id;
+    const entityId = newGoalEntityId || fallbackEnt;
+    if (!entityId) return;
+    if (!newGoalLabel.trim()) {
+      setActionError("Bitte eine Zielbeschreibung angeben.");
+      return;
+    }
+    const minStr = newGoalMin.trim();
+    const maxStr = newGoalMax.trim();
+    const parsedMin = minStr === "" ? undefined : Number(minStr.replace(",", "."));
+    const parsedMax = maxStr === "" ? undefined : Number(maxStr.replace(",", "."));
+    if ((minStr !== "" && !Number.isFinite(parsedMin)) || (maxStr !== "" && !Number.isFinite(parsedMax))) {
+      setActionError("Bitte gültige Zahlenwerte für Min/Max eingeben.");
+      return;
+    }
+    const earliestMs = isoDateToMs(newGoalEarliest, false);
+    const latestMs = isoDateToMs(newGoalLatest, true);
+    if (earliestMs !== null && latestMs !== null && earliestMs > latestMs) {
+      setActionError("Das Frühestens-Datum darf nicht nach dem Spätestens-Datum liegen.");
+      return;
+    }
+    setBusy(true);
+    setActionError("");
+    try {
+      const res = await api.createMetaGoal({
+        entity_id_or_obs_id: entityId,
+        property_name: newGoalProp.trim() || "harvest_ready",
+        label: newGoalLabel.trim(),
+        value_unit: newGoalUnit.trim(),
+        target_min: parsedMin,
+        target_max: parsedMax,
+        target_earliest_ms: earliestMs ?? undefined,
+        target_latest_ms: latestMs ?? undefined,
+      });
+      onSnapshotChange(res.snapshot);
+      setNewGoalLabel("");
+      setNewGoalMin("");
+      setNewGoalMax("");
+      setNewGoalEarliest("");
+      setNewGoalLatest("");
+      setShowNewGoalForm(false);
+    } catch (cause) {
+      setActionError(cause instanceof ApiError ? cause.message : "Neues Ziel konnte nicht angelegt werden.");
     } finally {
       setBusy(false);
     }
@@ -481,11 +540,85 @@ export default function ZukunftsgraphPanel({
             <input type="checkbox" checked={includeCancelled} onChange={(e) => setIncludeCancelled(e.target.checked)} />
             Abgebrochene zeigen
           </label>
+          <button
+            type="button"
+            className="secondary-action"
+            disabled={busy || snapshot.entities.length === 0}
+            onClick={() => setShowNewGoalForm((v) => !v)}
+          >
+            {showNewGoalForm ? "Ziel-Formular schließen" : "+ Neues Ziel"}
+          </button>
           <button type="button" className="secondary-action" disabled={busy} onClick={handleSync}>
             {busy ? "Synchronisiert …" : "Mit Archiv synchronisieren"}
           </button>
         </div>
       </div>
+
+      {showNewGoalForm && (
+        <form className="zg-new-goal-form" onSubmit={handleCreateNewGoal}>
+          <div className="zg-section-title">
+            <h3>Neues Ziel im Zukunftsgraphen anlegen</h3>
+            <span>Was · Wieviel · Bis wann</span>
+          </div>
+          <div className="form-two-col">
+            <label>
+              Weltlinie
+              <select
+                value={newGoalEntityId || snapshot.entities.find((e) => e.meta?.legacy_obs_id)?.id || snapshot.entities[0]?.id || ""}
+                onChange={(e) => setNewGoalEntityId(e.target.value)}
+              >
+                {snapshot.entities.map((ent) => (
+                  <option key={ent.id} value={ent.id}>{ent.name}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Ziel-Titel
+              <input
+                value={newGoalLabel}
+                onChange={(e) => setNewGoalLabel(e.target.value)}
+                placeholder="z. B. Igel-Stachelbart Ernteziel"
+                required
+              />
+            </label>
+          </div>
+          <div className="form-two-col">
+            <label>
+              Eigenschaft
+              <input value={newGoalProp} onChange={(e) => setNewGoalProp(e.target.value)} placeholder="harvest_ready, temperature_c" />
+            </label>
+            <label>
+              Einheit
+              <input value={newGoalUnit} onChange={(e) => setNewGoalUnit(e.target.value)} maxLength={16} placeholder="g, °C, %" />
+            </label>
+          </div>
+          <div className="form-two-col">
+            <label>
+              Min-Wert (optional)
+              <input inputMode="decimal" value={newGoalMin} onChange={(e) => setNewGoalMin(e.target.value)} placeholder="z. B. 200" />
+            </label>
+            <label>
+              Max-Wert (optional)
+              <input inputMode="decimal" value={newGoalMax} onChange={(e) => setNewGoalMax(e.target.value)} placeholder="optional" />
+            </label>
+          </div>
+          <div className="form-two-col">
+            <label>
+              Frühestens (ab)
+              <input type="date" value={newGoalEarliest} onChange={(e) => setNewGoalEarliest(e.target.value)} />
+            </label>
+            <label>
+              Spätestens (bis)
+              <input type="date" value={newGoalLatest} onChange={(e) => setNewGoalLatest(e.target.value)} />
+            </label>
+          </div>
+          <div className="zg-goal-actions">
+            <button type="submit" className="save-button" disabled={busy}>
+              Ziel anlegen <span aria-hidden="true">↗</span>
+            </button>
+          </div>
+        </form>
+      )}
 
       {actionError && <p className="form-error" role="alert">{actionError}</p>}
       {snapshot.last_feedback?.summary && (

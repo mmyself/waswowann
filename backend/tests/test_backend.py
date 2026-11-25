@@ -20,7 +20,7 @@ def test_migrations_foreign_keys_and_checks(tmp_path):
     config=Settings('127.0.0.1',8000,'http://localhost:3000',tmp_path/'db.sqlite3',tmp_path/'photos',tmp_path/'tmp',tmp_path/'incoming','Europe/Berlin','','','')
     migrate(config); migrate(config)
     with connect(config.database_path) as conn:
-        assert conn.execute('PRAGMA user_version').fetchone()[0]==5
+        assert conn.execute('PRAGMA user_version').fetchone()[0]==6
         assert conn.execute('PRAGMA foreign_keys').fetchone()[0]==1
         with conn:
             conn.execute("INSERT INTO observations(id,category,title,description,created_at_ms,updated_at_ms) VALUES('o','Pilz','title','',1,1)")
@@ -46,7 +46,7 @@ def test_migration_002_preserves_existing_data_and_creates_backup(tmp_path):
     backups = list(tmp_path.glob('db.sqlite3.pre-002.*.bak'))
     assert len(backups) == 1
     with connect(config.database_path) as conn:
-        assert conn.execute('PRAGMA user_version').fetchone()[0] == 5
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 6
         assert conn.execute("SELECT title FROM observations WHERE id='legacy'").fetchone()[0] == 'Legacy title'
         assert conn.execute("SELECT sha256 FROM media WHERE id='media'").fetchone()[0] == 'hash'
         note = conn.execute("SELECT status,raw_text FROM gemini_notes WHERE id='note'").fetchone()

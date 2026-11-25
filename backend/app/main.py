@@ -6,7 +6,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.config import settings
 from app.db import db, migrate
 from app.services.import_jobs import recover_jobs
-from app.routes import imports, media, observations, google, uploads, analysis, zukunftsgraph
+from app.routes import imports, media, observations, google, uploads, analysis, zukunftsgraph, chat
 
 MUTATING = {'POST','PATCH','PUT','DELETE'}
 
@@ -19,7 +19,7 @@ class BrowserMutationGuard(BaseHTTPMiddleware):
             if origin not in settings.allowed_origins:
                 return JSONResponse(status_code=403,content={'error':{'code':'ORIGIN_DENIED','message':'Ursprungsdomain nicht erlaubt'}})
             content_type=request.headers.get('content-type','').split(';',1)[0].strip().lower()
-            is_upload=request.method=='POST' and request.url.path=='/api/uploads'
+            is_upload=request.method=='POST' and request.url.path in {'/api/uploads', '/api/chat/transcribe'}
             if is_upload and content_type!='multipart/form-data':
                 return JSONResponse(status_code=415,content={'error':{'code':'MULTIPART_REQUIRED','message':'Multipart-Anfrage erforderlich'}})
             if not is_upload and not (request.method=='DELETE' and not content_type) and content_type!='application/json':
@@ -47,6 +47,7 @@ app.include_router(google.router)
 app.include_router(uploads.router)
 app.include_router(analysis.router)
 app.include_router(zukunftsgraph.router)
+app.include_router(chat.router)
 
 @app.get('/api/health')
 def health():

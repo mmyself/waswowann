@@ -1,5 +1,8 @@
 import type {
   ApiErrorPayload,
+  ChatHistoryResponse,
+  ChatScopeType,
+  ChatSendResponse,
   EscalationAction,
   MediaMeasurementPatch,
   MergeCandidate,
@@ -230,4 +233,22 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  chatMessages: (scopeType: ChatScopeType, scopeId: string, signal?: AbortSignal) => {
+    const qs = new URLSearchParams({ scope_type: scopeType, scope_id: scopeId });
+    return request<ChatHistoryResponse>(`/api/chat/messages?${qs.toString()}`, { signal });
+  },
+  sendChatMessage: (payload: { message: string; scope_type: ChatScopeType; scope_id: string }) =>
+    request<ChatSendResponse>("/api/chat/messages", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  clearChatMessages: (scopeType: ChatScopeType, scopeId: string) => {
+    const qs = new URLSearchParams({ scope_type: scopeType, scope_id: scopeId });
+    return request<{ deleted: number }>(`/api/chat/messages?${qs.toString()}`, { method: "DELETE" });
+  },
+  transcribeAudio: (blob: Blob, filename = "voice.webm") => {
+    const body = new FormData();
+    body.append("audio", blob, filename);
+    return request<{ text: string }>("/api/chat/transcribe", { method: "POST", body });
+  },
 };
