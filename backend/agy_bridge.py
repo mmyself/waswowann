@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Standalone OpenAI-compatible Antigravity Bridge for WoWannWas.
+"""Standalone OpenAI-compatible Antigravity Bridge for WasWoWann.
 
 Uses the host's native `agy` CLI directly so the selected model reads attached
-images via `read_file` with WoWannWas's full prompt (no model downgrade and no
+images via `read_file` with WasWoWann's full prompt (no model downgrade and no
 dependency on external bridges).
 """
 from __future__ import annotations
@@ -26,7 +26,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger("wowannwas-agy-bridge")
+logger = logging.getLogger("waswowann-agy-bridge")
 
 DISPLAY_TO_ID = {
     "gemini 4 hydrogen (low)": "gemini-4-hydrogen-low",
@@ -123,7 +123,7 @@ def run_agy(model: str, prompt_text: str, images: list[tuple[str, bytes]], timeo
     if not agy_bin or not Path(agy_bin).exists():
         raise RuntimeError("AGY_CLI_NOT_FOUND")
 
-    temp_dir = Path(tempfile.mkdtemp(prefix="wowannwas-agy-"))
+    temp_dir = Path(tempfile.mkdtemp(prefix="waswowann-agy-"))
     try:
         saved_paths: list[Path] = []
         for idx, (ext, raw_bytes) in enumerate(images):
@@ -209,7 +209,7 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            self._send_json(200, {"status": "ok", "service": "wowannwas-agy-bridge"})
+            self._send_json(200, {"status": "ok", "service": "waswowann-agy-bridge"})
             return
         if self.path == "/v1/models":
             if not self._authorized():
@@ -219,7 +219,7 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
                 200,
                 {
                     "object": "list",
-                    "data": [{"id": mid, "object": "model", "owned_by": "wowannwas-agy-bridge"} for mid in SUPPORTED_MODELS],
+                    "data": [{"id": mid, "object": "model", "owned_by": "waswowann-agy-bridge"} for mid in SUPPORTED_MODELS],
                 },
             )
             return
@@ -294,7 +294,7 @@ def main() -> None:
     if not os.environ.get("AGY_BRIDGE_AUTH_KEY", "").strip():
         raise SystemExit("AGY_BRIDGE_AUTH_KEY must be set in environment or backend/.env")
     server = http.server.ThreadingHTTPServer((host, port), BridgeHandler)
-    logger.info("WoWannWas Antigravity Bridge listening on http://%s:%d", host, port)
+    logger.info("WasWoWann Antigravity Bridge listening on http://%s:%d", host, port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

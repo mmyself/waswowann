@@ -100,7 +100,7 @@ class Settings:
                 for item in os.getenv("FRONTEND_ALLOWED_ORIGINS", "").split(",")
                 if item.strip()
             ),
-            database_path=_configured_path("DATABASE_PATH", "../data/wowannwas.sqlite3"),
+            database_path=_configured_path("DATABASE_PATH", "../data/waswowann.sqlite3"),
             photo_storage_dir=_configured_path("PHOTO_STORAGE_DIR", "../data/photos"),
             temp_storage_dir=_configured_path("TEMP_STORAGE_DIR", "../data/tmp"),
             local_import_dir=_configured_path("LOCAL_IMPORT_DIR", "../data/incoming"),

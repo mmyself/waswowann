@@ -1,4 +1,4 @@
-# WoWannWas
+# WasWoWann
 
 Lokaler Single-User-Prototyp für Beobachtungen mit Foto, Ort und Aufnahmezeit. Die Anwendung kombiniert FastAPI, SQLite und Next.js mit einer MapLibre-Karte. Die Demo funktioniert ohne Google-Zugang, Gemini oder Wetterdienst; Kartenstil und Kacheln benötigen Internetzugriff.
 

@@ -188,7 +188,7 @@ def test_migration_recovers_per_photo_exif_from_legacy_images(config):
 
 
 def test_migration_on_pre_timeline_backup(config):
-    backup = Path(__file__).resolve().parents[2] / 'data' / 'wowannwas.sqlite3.bak-pre-object-timeline'
+    backup = Path(__file__).resolve().parents[2] / 'data' / 'waswowann.sqlite3.bak-pre-object-timeline'
     if not backup.is_file():
         pytest.skip('local pre-timeline database backup is not available')
     shutil.copyfile(backup, config.database_path)

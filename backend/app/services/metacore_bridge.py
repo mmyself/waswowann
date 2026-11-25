@@ -1,4 +1,4 @@
-"""Data bridge synchronizing legacy WoWannWas SQLite observations into MetaCore worldlines."""
+"""Data bridge synchronizing legacy WasWoWann SQLite observations into MetaCore worldlines."""
 
 from __future__ import annotations
 
@@ -1000,7 +1000,7 @@ def build_live_snapshot(
     snap = export_graph_snapshot(
         repo,
         engine,
-        title="WoWannWas Zukunftsgraph",
+        title="WasWoWann Zukunftsgraph",
         subtitle="Live-Weltlinien, Habitate, Kausalpläne & 4-Stufen-Eskalation",
         last_feedback=last_feedback,
     )

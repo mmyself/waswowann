@@ -1,9 +1,9 @@
-# WoWannWas – Projektplan & Architektur-Übersicht
+# WasWoWann – Projektplan & Architektur-Übersicht
 
 Stand: 2026-11-14
 
 ## 1. Projektidee
-**WoWannWas** sammelt Beobachtungen (Pflanzen, Pilze, Personen, Dinge, Ereignisse) mit **Wo** (Ort), **Wann** (Zeit) und **Was** (Foto + Beschreibung/Bestimmung) auf einer interaktiven Karte.
+**WasWoWann** sammelt Beobachtungen (Pflanzen, Pilze, Personen, Dinge, Ereignisse) als Weltlinien mit **Was** (Objekt/Foto/Bestimmung), **Wo** (Ort) und **Wann** (Zeit) auf einer interaktiven Karte.
 
 * **Karte + Zeitschieber:** Zeitpunkte oder Zeitfenster lassen sich über einen Zeitschieber ein- und ausblenden (oder alle Funde gleichzeitig anzeigen).
 * **Rechte Seitenleiste:** Scrollbare Detailansicht mit vergrößertem Foto, Beschreibung, Gemini-Analyse, Unsicherheitswerten und Wetterverlauf.

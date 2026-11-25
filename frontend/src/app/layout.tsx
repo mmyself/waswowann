@@ -3,7 +3,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Wann Wo Was — Dein Beobachtungsarchiv",
+  title: "Was Wo Wann — Dein Beobachtungsarchiv",
   description: "Ein persönliches Archiv für Beobachtungen mit Ort, Zeit und Bild.",
 };
 

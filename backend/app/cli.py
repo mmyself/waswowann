@@ -9,7 +9,7 @@ from app.services.metacore_bridge import sync_legacy_observations
 
 
 def main():
-    parser=argparse.ArgumentParser(prog='wowannwas')
+    parser=argparse.ArgumentParser(prog='waswowann')
     parser.add_argument('command',choices=['migrate','seed-demo','import-local','sync-metacore'])
     args=parser.parse_args()
     migrate()

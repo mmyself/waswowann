@@ -122,7 +122,7 @@ export default function Workspace() {
 
   return <main className="app-shell">
     <header className="topbar">
-      <a className="wordmark" href="/" aria-label="Wann Wo Was Startseite"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><span>Wann Wo <span className="wordmark-light">Was</span></span></a>
+      <a className="wordmark" href="/" aria-label="Was Wo Wann Startseite"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><span>Was Wo <span className="wordmark-light">Wann</span></span></a>
       <a className="upload-nav-link" href="/upload">+ Fund hochladen</a>
       <ImportControls config={config} onImported={refresh} />
     </header>

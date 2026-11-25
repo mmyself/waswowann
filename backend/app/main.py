@@ -37,7 +37,7 @@ async def lifespan(app:FastAPI):
     finally:
         await runner.stop()
 
-app=FastAPI(title='WoWannWas API',version='0.1.0',lifespan=lifespan)
+app=FastAPI(title='WasWoWann API',version='0.1.0',lifespan=lifespan)
 app.add_middleware(BrowserMutationGuard)
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.allowed_origins),allow_credentials=True,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Content-Type'])
 app.include_router(observations.router)

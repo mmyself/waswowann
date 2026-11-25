@@ -106,7 +106,7 @@ export default function UploadWorkspace() {
   const selectedObservation = activeObservation && detail?.id === activeObservation ? detail : null;
 
   return <main className="app-shell upload-shell">
-    <header className="topbar upload-topbar"><a className="wordmark" href="/" aria-label="Wann Wo Was Startseite"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><span>Wann Wo <span className="wordmark-light">Was</span></span></a><a className="upload-nav-link" href="/">← Zur Karte</a></header>
+    <header className="topbar upload-topbar"><a className="wordmark" href="/" aria-label="Was Wo Wann Startseite"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><span>Was Wo <span className="wordmark-light">Wann</span></span></a><a className="upload-nav-link" href="/">← Zur Karte</a></header>
     <div className="upload-intro"><p className="eyebrow">Neuer Eintrag</p><h1>Ein Augenblick,<br /><em>festgehalten.</em></h1><p>Fotos auswählen, automatisch einordnen lassen und Fundangaben ergänzen. Originale werden nur für diesen Upload im Browser gehalten.</p></div>
     {!observationId && <section className="upload-card" aria-labelledby="upload-heading">
       <div className="upload-card-heading"><div><p className="eyebrow">01 / AUSWÄHLEN</p><h2 id="upload-heading">Deine Bilder</h2></div><span className="upload-limit">Bis zu 250 Bilder · Google-Fotos-ZIP möglich</span></div>

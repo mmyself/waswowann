@@ -19,7 +19,7 @@ from app.services.google_oauth import authenticated,finish_oauth,start_oauth,acc
 from app.services.google_picker import PickerClient,GoogleAPIError
 
 router=APIRouter(prefix='/api/google',tags=['google'])
-COOKIE='wowannwas_session'
+COOKIE='waswowann_session'
 
 def _session(request:Request,create=False):
     value=request.cookies.get(COOKIE)

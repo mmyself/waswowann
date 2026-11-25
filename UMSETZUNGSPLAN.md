@@ -1,4 +1,4 @@
-# WoWannWas – Technischer Umsetzungsplan für den Test-Prototyp
+# WasWoWann – Technischer Umsetzungsplan für den Test-Prototyp
 
 Stand: 2026-11-14
 Grundlage: `PROJEKTPLAN.md`
@@ -50,7 +50,7 @@ Bei der Implementierung aktuelle stabile, miteinander kompatible Versionen wähl
 ### 2.3 Projektstruktur, die anschließend angelegt wird
 
 ```text
-WoWannWas/
+WasWoWann/
   PROJEKTPLAN.md
   UMSETZUNGSPLAN.md
   backend/
@@ -424,7 +424,7 @@ Für automatisierte Tests Google-HTTP-Antworten mocken; der UI-Demo-Modus benöt
 
 ```text
 +-----------------------------------------------------------+
-| WoWannWas     Demo / Lokaler Ordner / Google Photos         |
+| WasWoWann     Demo / Lokaler Ordner / Google Photos         |
 +--------------------------------------+--------------------+
 |                                      | Detail-Sidebar     |
 | Karte                                | großes Foto        |
@@ -510,7 +510,7 @@ Ohne Ort oder Zeit zusätzlich „Ort und Aufnahmezeit erforderlich“. Noch kei
 HOST=127.0.0.1
 PORT=8000
 FRONTEND_ORIGIN=http://localhost:3000
-DATABASE_PATH=../data/wowannwas.sqlite3
+DATABASE_PATH=../data/waswowann.sqlite3
 PHOTO_STORAGE_DIR=../data/photos
 TEMP_STORAGE_DIR=../data/tmp
 LOCAL_IMPORT_DIR=../data/incoming
@@ -520,7 +520,7 @@ GOOGLE_CLIENT_SECRET=
 GOOGLE_REDIRECT_URI=http://localhost:8000/api/google/oauth/callback
 ```
 
-Relative Dateipfade immer gegen das feste Backend-Projektverzeichnis auflösen, nicht gegen das zufällige aktuelle Arbeitsverzeichnis. `.env` explizit aus diesem Verzeichnis laden. Die angegebenen Datenpfade zeigen damit in das gemeinsame `WoWannWas/data/`.
+Relative Dateipfade immer gegen das feste Backend-Projektverzeichnis auflösen, nicht gegen das zufällige aktuelle Arbeitsverzeichnis. `.env` explizit aus diesem Verzeichnis laden. Die angegebenen Datenpfade zeigen damit in das gemeinsame `WasWoWann/data/`.
 
 ### 8.2 Frontend `.env.local.example`
 
