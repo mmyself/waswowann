@@ -27,6 +27,8 @@
 > * **Wo**, **Wann** und weitere Messwerte (**Wie viel** / Zustandseigenschaften) hängen als einzelne **Zustände** an diesem *Was* — links von **JETZT** als gemessene Vergangenheit (`observed`), rechts von **JETZT** als Prognose (`predicted`) oder Ziel (`desired`).
 > * Die **Weltlinie** ist genau das Ganze zusammen: die durchgehende Lebens- und Zustands-Spur dieses *Was* durch Raum (*Wo*) und Zeit (*Wann*) — verbunden durch kausale Transformationen. Darum ist die Reihenfolge **Was – Wo – Wann** für den Zukunftsgraphen konsequent.
 
+*Begriffsherkunft:* Der Begriff **Weltlinie** wurde 1908 vom Mathematiker **Hermann Minkowski** in seinem Vortrag „Raum und Zeit“ geprägt — er beschreibt in der Physik die durchgehende Bahn eines Objekts durch Raum und Zeit (die vierdimensionale Raumzeit; [Wikipedia: Weltlinie](https://de.wikipedia.org/wiki/Weltlinie)).
+
 ---
 
 ## Die 3 Ebenen einfach sortiert
