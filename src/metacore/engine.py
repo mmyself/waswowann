@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
+from collections import deque
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -241,6 +242,15 @@ class MetaCoreEngine:
                 if (tx := self.repo.get_transformation(e.transformation_id)) is not None
                 and tx.modality != "cancelled"
             ]
+            # If both a composite parent and its child produce `pred`, surface only the boundary parent
+            active_tx_ids = {e.transformation_id for e in active_edges}
+            filtered_edges: list[Edge] = []
+            for e in active_edges:
+                tx = self.repo.get_transformation(e.transformation_id)
+                if tx is not None and tx.parent_id is not None and tx.parent_id in active_tx_ids:
+                    continue
+                filtered_edges.append(e)
+            active_edges = filtered_edges
             if active_edges:
                 for edge in active_edges:
                     tx = self.repo.get_transformation(edge.transformation_id)
@@ -352,13 +362,44 @@ class MetaCoreEngine:
         combined = combine_goal_probability(list(dim_probs.values()))
         return combined, dim_probs, broken
 
-    def _evaluate_preconditions(self, tx: Transformation | None, edge: Edge | None) -> float:
+    def _is_ancestor_tx(self, maybe_ancestor_id: str, node_id: str) -> bool:
+        """Return True if `maybe_ancestor_id` is an ancestor of `node_id` via `parent_id`."""
+        cur_id: str | None = node_id
+        seen: set[str] = set()
+        while cur_id and cur_id not in seen:
+            seen.add(cur_id)
+            tx = self.repo.get_transformation(cur_id)
+            if tx is None:
+                break
+            if tx.parent_id == maybe_ancestor_id:
+                return True
+            cur_id = tx.parent_id
+        return False
+
+    def _evaluate_preconditions(
+        self,
+        tx: Transformation | None,
+        edge: Edge | None,
+        *,
+        _visited: set[str] | None = None,
+    ) -> float:
         if tx is None:
             return 1.0
         if tx.modality == "cancelled":
             return 0.0
 
-        p_pre = tx.success_prob
+        visited = _visited if _visited is not None else set()
+        if tx.id in visited:
+            return 1.0
+        visited.add(tx.id)
+
+        children = [
+            c
+            for c in self.repo.list_transformations(modality="planned")
+            if c.parent_id == tx.id
+        ]
+        # Composite parents aggregate their children's success_prob; avoid double-counting own prior
+        p_pre = 1.0 if children else tx.success_prob
         if edge is not None and edge.logic_group == "WORLD_OR" and edge.probability is not None:
             p_pre *= edge.probability
 
@@ -379,6 +420,35 @@ class MetaCoreEngine:
             logic=guard_logic,
             in_states=in_states,
         )
+
+        # Evaluate nested child transformations belonging to this composite step
+        for child in children:
+            p_pre *= self._evaluate_preconditions(child, None, _visited=visited)
+
+        # Traverse upstream producing planned transformations recursively across the chain
+        for st in in_states:
+            if st.modality != "predicted":
+                continue
+            prod_edges = self.repo.list_edges(state_id=st.id, direction="out")
+            prod_pairs: list[tuple[Transformation, Edge]] = []
+            for pe in prod_edges:
+                if pe.logic_group == "CHOICE_OR" and not pe.is_selected:
+                    continue
+                up_tx = self.repo.get_transformation(pe.transformation_id)
+                if (
+                    up_tx is None
+                    or up_tx.modality != "planned"
+                    or up_tx.id == tx.id
+                    or self._is_ancestor_tx(up_tx.id, tx.id)
+                    or self._is_ancestor_tx(tx.id, up_tx.id)
+                ):
+                    continue
+                prod_pairs.append((up_tx, pe))
+            prod_ids = {up.id for up, _ in prod_pairs}
+            for up_tx, pe in prod_pairs:
+                if up_tx.parent_id is not None and up_tx.parent_id in prod_ids:
+                    continue
+                p_pre *= self._evaluate_preconditions(up_tx, pe, _visited=visited)
 
         return max(0.0, min(1.0, p_pre))
 
@@ -635,7 +705,11 @@ class MetaCoreEngine:
                 tx_a, sa, ea = items[i]
                 for j in range(i + 1, len(items)):
                     tx_b, sb, eb = items[j]
-                    if tx_a.id == tx_b.id:
+                    if (
+                        tx_a.id == tx_b.id
+                        or self._is_ancestor_tx(tx_a.id, tx_b.id)
+                        or self._is_ancestor_tx(tx_b.id, tx_a.id)
+                    ):
                         continue
                     ov_start = max(sa, sb)
                     ov_end = min(ea, eb)
@@ -686,6 +760,131 @@ class MetaCoreEngine:
     # Template instantiation
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _collect_formula_props(formula: dict[str, Any]) -> set[str]:
+        props: set[str] = set()
+        input_roles = formula.get("input_roles")
+        if isinstance(input_roles, dict):
+            props.update(str(k) for k in input_roles)
+        for key in ("ingredients", "guards", "ratio_guards", "modifiers"):
+            for item in formula.get(key, []):
+                if not isinstance(item, dict):
+                    continue
+                for prop_key in ("property_name", "numerator_property", "denominator_property"):
+                    if item.get(prop_key):
+                        props.add(str(item[prop_key]))
+        return props
+
+    def _rollup_composite_tx(self, parent_tx_id: str) -> None:
+        """Roll up start time, summed duration/cost, RSS sigma, and product success_prob from children."""
+        parent = self.repo.get_transformation(parent_tx_id)
+        if parent is None:
+            return
+        children = [
+            t
+            for t in self.repo.list_transformations(modality="planned")
+            if t.parent_id == parent_tx_id
+        ]
+        if not children:
+            return
+
+        windows = [w for c in children if (w := self._tx_time_window(c)) is not None]
+        if windows:
+            rolled_start = min(w[0] for w in windows)
+            rolled_end = max(w[1] for w in windows)
+            rolled_dur_s: float | None = max(0.0, (rolled_end - rolled_start) / 1000.0)
+        else:
+            rolled_start = parent.meta.get("scheduled_start_ms")
+            durs = [c.duration_seconds for c in children if c.duration_seconds is not None]
+            rolled_dur_s = sum(durs) if durs else parent.duration_seconds
+
+        sigmas = [c.duration_sigma_seconds for c in children if c.duration_sigma_seconds is not None]
+        rolled_sigma_s = (math.hypot(*sigmas) or None) if sigmas else parent.duration_sigma_seconds
+        rolled_cost = sum(c.cost for c in children)
+        rolled_prob = math.prod(c.success_prob for c in children)
+
+        meta_upd = dict(parent.meta)
+        if rolled_start is not None:
+            meta_upd["scheduled_start_ms"] = int(rolled_start)
+        meta_upd["is_composite"] = True
+
+        self.repo.update_transformation(
+            parent_tx_id,
+            duration_seconds=rolled_dur_s,
+            duration_sigma_seconds=rolled_sigma_s,
+            cost=rolled_cost,
+            success_prob=max(1e-9, min(1.0, rolled_prob)),
+            meta=meta_upd,
+        )
+        if parent.parent_id is not None:
+            self._rollup_composite_tx(parent.parent_id)
+
+    @staticmethod
+    def _pick_primary_input(inputs: Sequence[State], edges: Sequence[Edge] = ()) -> State:
+        if edges:
+            causal_ids = {e.state_id for e in edges if e.role in ("consumes", "uses")}
+            causal_num = next((s for s in inputs if s.id in causal_ids and s.value_num is not None), None)
+            if causal_num is not None:
+                return causal_num
+            causal_any = next((s for s in inputs if s.id in causal_ids), None)
+            if causal_any is not None:
+                return causal_any
+        return next((s for s in inputs if s.value_num is not None), inputs[0])
+
+    def _compute_duration_step_output(
+        self,
+        *,
+        template: Transformation | None,
+        formula: dict[str, Any],
+        primary_in: State,
+        modifiers: Sequence[dict[str, Any]],
+        inputs: Sequence[State],
+    ) -> tuple[float | None, float | None]:
+        inherit_val = bool(formula.get("inherit_input_value", False))
+        raw_out_val = None if inherit_val else formula.get("output_value")
+        raw_out_sig = None if inherit_val else formula.get("output_sigma")
+        dur_src = template.duration_source if template is not None else "derived"
+        if raw_out_val is None and primary_in.value_num is not None:
+            base_g = GaussianValue(
+                primary_in.value_num,
+                primary_in.value_sigma or 0.0,
+                source=primary_in.source,
+            )
+            if formula.get("scale_mean") is not None:
+                scaled = propagate_product(
+                    base_g,
+                    GaussianValue(
+                        float(formula["scale_mean"]),
+                        float(formula.get("scale_sigma", 0.0)),
+                        source=str(formula.get("scale_source", "derived")),
+                    ),
+                )
+                out_val: float | None = scaled.mean
+                out_sig: float | None = scaled.sigma
+            else:
+                out_val = base_g.mean
+                out_sig = primary_in.value_sigma
+        else:
+            out_val = float(raw_out_val) if raw_out_val is not None else primary_in.value_num
+            out_sig = float(raw_out_sig) if raw_out_sig is not None else primary_in.value_sigma
+
+        if out_val is not None and modifiers:
+            mod_g, _, _ = self._apply_modifiers(
+                output_value=GaussianValue(
+                    float(out_val),
+                    float(out_sig or 0.0),
+                    source="ai_prior" if dur_src == "ai_prior" else "derived",
+                ),
+                duration_seconds=None,
+                duration_sigma_seconds=None,
+                modifiers=modifiers,
+                inputs=inputs,
+            )
+            assert mod_g is not None
+            out_val = mod_g.mean
+            out_sig = mod_g.sigma
+        return out_val, out_sig
+
     def instantiate_template(
         self,
         template_id: str,
@@ -697,8 +896,9 @@ class MetaCoreEngine:
         split_parts: int | None = None,
         split_entities: Sequence[str] | None = None,
         branch_key: str = "default",
+        parent_tx_id: str | None = None,
     ) -> MutationFeedback:
-        """Instantiate a reusable template into planned transformation(s) and predicted states."""
+        """Instantiate a reusable template (or composite hierarchy) into planned transformation(s)."""
         template = self.repo.get_transformation(template_id)
         if template is None:
             raise KeyError(f"Unbekannte Vorlage: {template_id}")
@@ -734,6 +934,120 @@ class MetaCoreEngine:
             times = [s.time_ms for s in inputs if s.time_ms is not None]
             base_start = max(times) if times else now_ms()
 
+        child_templates = sorted(
+            [
+                t
+                for t in self.repo.list_transformations(modality="template")
+                if t.parent_id == template.id
+            ],
+            key=lambda t: (int(t.meta.get("step_order", 0)), t.created_at_ms, t.id),
+        )
+        if child_templates:
+            planned_parent = self.repo.create_transformation(
+                TransformationCreate(
+                    name=template.name,
+                    modality="planned",
+                    driver=template.driver,
+                    template_id=template.id,
+                    parent_id=parent_tx_id,
+                    duration_seconds=template.duration_seconds,
+                    duration_sigma_seconds=template.duration_sigma_seconds,
+                    duration_source=template.duration_source,
+                    cost=template.cost,
+                    success_prob=template.success_prob,
+                    formula=formula,
+                    meta={"scheduled_start_ms": base_start, "is_composite": True},
+                )
+            )
+            parent_roles: dict[str, EdgeRole] = dict(formula.get("input_roles", {}))
+            for st in inputs:
+                role: EdgeRole = parent_roles.get(st.property_name, "consumes")
+                self.repo.create_edge(
+                    EdgeCreate(
+                        transformation_id=planned_parent.id,
+                        state_id=st.id,
+                        direction="in",
+                        role=role,
+                        branch_key=branch_key,
+                    )
+                )
+
+            cur_start_ms: int | None = base_start
+            prev_primary_output_id: str | None = None
+            all_created_ids: list[str] = []
+            final_output_ids: list[str] = []
+
+            for idx, child_tpl in enumerate(child_templates):
+                child_props = self._collect_formula_props(child_tpl.formula)
+                if idx == 0:
+                    child_in_ids = [inputs[0].id]
+                    for st in inputs[1:]:
+                        if not child_props or st.property_name in child_props:
+                            child_in_ids.append(st.id)
+                else:
+                    assert prev_primary_output_id is not None
+                    child_in_ids = [prev_primary_output_id]
+                    for st in inputs:
+                        if st.id != prev_primary_output_id and st.property_name in child_props:
+                            child_in_ids.append(st.id)
+
+                is_last = idx == len(child_templates) - 1
+                child_fb = self.instantiate_template(
+                    child_tpl.id,
+                    input_state_ids=child_in_ids,
+                    target_entity_id=target_entity_id,
+                    start_time_ms=cur_start_ms,
+                    ai_priors=ai_priors,
+                    split_parts=split_parts if is_last else None,
+                    split_entities=split_entities if is_last else None,
+                    branch_key=branch_key,
+                    parent_tx_id=planned_parent.id,
+                )
+                all_created_ids.extend(child_fb.created_state_ids)
+                if not is_last:
+                    for sid in child_fb.created_state_ids:
+                        st_obj = self.repo.get_state(sid)
+                        if st_obj is not None:
+                            new_meta = dict(st_obj.meta)
+                            new_meta.setdefault("internal_to_parent_tx_id", planned_parent.id)
+                            self.repo.update_state(sid, meta=new_meta)
+                else:
+                    final_output_ids = list(child_fb.created_state_ids)
+
+                prev_primary_output_id = child_fb.created_state_ids[0]
+                prev_state = self.repo.get_state(prev_primary_output_id)
+                if prev_state is not None and prev_state.time_ms is not None:
+                    cur_start_ms = prev_state.time_ms
+
+            planned_children = [
+                t
+                for t in self.repo.list_transformations(modality="planned")
+                if t.parent_id == planned_parent.id
+            ]
+            if planned_children:
+                last_child_tx = planned_children[-1]
+                for oe in self.repo.list_edges(transformation_id=last_child_tx.id, direction="out"):
+                    self.repo.create_edge(
+                        EdgeCreate(
+                            transformation_id=planned_parent.id,
+                            state_id=oe.state_id,
+                            direction="out",
+                            role=oe.role,
+                            branch_key=oe.branch_key,
+                            ratio_mean=oe.ratio_mean,
+                            ratio_sigma=oe.ratio_sigma,
+                        )
+                    )
+
+            self._rollup_composite_tx(planned_parent.id)
+            return self._build_feedback(
+                created_state_ids=final_output_ids,
+                summary=(
+                    f"Verschachtelte Vorlage '{template.name}' mit {len(child_templates)} "
+                    f"Unterschritten instanziiert."
+                ),
+            )
+
         modifiers: list[dict[str, Any]] = list(formula.get("modifiers", []))
         _, mod_dur_s, mod_dur_sigma_s = self._apply_modifiers(
             output_value=None,
@@ -744,8 +1058,18 @@ class MetaCoreEngine:
         )
         dur_s = mod_dur_s or 0.0
         dur_sigma_s = mod_dur_sigma_s
-        in_sigmas_s = [s.sigma_seconds for s in inputs if s.sigma_seconds is not None]
-        base_time_sigma = max(in_sigmas_s) if in_sigmas_s else 0.0
+        input_roles: dict[str, EdgeRole] = dict(formula.get("input_roles", {}))
+        for ing in formula.get("ingredients", []):
+            if isinstance(ing, dict) and ing.get("property_name") and ing.get("role"):
+                input_roles.setdefault(str(ing["property_name"]), ing["role"])
+        causal_sigmas_s = [
+            s.sigma_seconds
+            for s in inputs
+            if s.sigma_seconds is not None and input_roles.get(s.property_name, "consumes") in ("consumes", "uses")
+        ]
+        all_sigmas_s = [s.sigma_seconds for s in inputs if s.sigma_seconds is not None]
+        sigmas_pool = causal_sigmas_s or all_sigmas_s
+        base_time_sigma = max(sigmas_pool) if sigmas_pool else 0.0
         out_time_ms = base_start + int(dur_s * 1000)
         out_time_sigma = math.hypot(base_time_sigma, dur_sigma_s or 0.0) or None
 
@@ -755,7 +1079,7 @@ class MetaCoreEngine:
                 modality="planned",
                 driver=template.driver,
                 template_id=template.id,
-                parent_id=template.parent_id,
+                parent_id=parent_tx_id,
                 duration_seconds=mod_dur_s,
                 duration_sigma_seconds=mod_dur_sigma_s,
                 duration_source=template.duration_source,
@@ -766,24 +1090,23 @@ class MetaCoreEngine:
             )
         )
 
-        input_roles: dict[str, EdgeRole] = dict(formula.get("input_roles", {}))
-        for ing in formula.get("ingredients", []):
-            if isinstance(ing, dict) and ing.get("property_name") and ing.get("role"):
-                input_roles.setdefault(str(ing["property_name"]), ing["role"])
+        created_in_edges: list[Edge] = []
         for st in inputs:
             role: EdgeRole = input_roles.get(st.property_name, "consumes")
-            self.repo.create_edge(
-                EdgeCreate(
-                    transformation_id=planned_tx.id,
-                    state_id=st.id,
-                    direction="in",
-                    role=role,
-                    branch_key=branch_key,
+            created_in_edges.append(
+                self.repo.create_edge(
+                    EdgeCreate(
+                        transformation_id=planned_tx.id,
+                        state_id=st.id,
+                        direction="in",
+                        role=role,
+                        branch_key=branch_key,
+                    )
                 )
             )
 
         created_state_ids: list[str] = []
-        primary_in = next((s for s in inputs if s.value_num is not None), inputs[0])
+        primary_in = self._pick_primary_input(inputs, created_in_edges)
         out_entity_id = target_entity_id or primary_in.entity_id
         out_prop = str(formula.get("output_property", primary_in.property_name))
         out_unit = str(formula.get("output_unit", primary_in.value_unit))
@@ -852,23 +1175,13 @@ class MetaCoreEngine:
                 )
             )
         else:
-            out_val = formula.get("output_value", primary_in.value_num)
-            out_sig = formula.get("output_sigma", primary_in.value_sigma)
-            if out_val is not None and modifiers:
-                mod_g, _, _ = self._apply_modifiers(
-                    output_value=GaussianValue(
-                        float(out_val),
-                        float(out_sig or 0.0),
-                        source="ai_prior" if template.duration_source == "ai_prior" else "derived",
-                    ),
-                    duration_seconds=None,
-                    duration_sigma_seconds=None,
-                    modifiers=modifiers,
-                    inputs=inputs,
-                )
-                assert mod_g is not None
-                out_val = mod_g.mean
-                out_sig = mod_g.sigma
+            out_val, out_sig = self._compute_duration_step_output(
+                template=template,
+                formula=formula,
+                primary_in=primary_in,
+                modifiers=modifiers,
+                inputs=inputs,
+            )
             out_state = self.repo.create_state(
                 StateCreate(
                     entity_id=out_entity_id,
@@ -1111,7 +1424,7 @@ class MetaCoreEngine:
     # ------------------------------------------------------------------
 
     def record_observation(self, data: StateCreate) -> MutationFeedback:
-        """Persist a real observation, check Stage-1 triggers, calibrate priors, and re-evaluate goals."""
+        """Persist a real observation, check triggers, calibrate priors, cascade chains, and re-evaluate goals."""
         if data.modality != "observed":
             raise ValueError("record_observation erfordert modality='observed'")
 
@@ -1122,8 +1435,11 @@ class MetaCoreEngine:
 
         # Calibrate any planned transformation output matching (entity_id, property_name)
         planned_txs = self.repo.list_transformations(modality="planned")
+        composite_ids = {t.parent_id for t in planned_txs if t.parent_id is not None}
+        rolled_parents: set[str] = set()
+
         for tx in planned_txs:
-            if tx.template_id is None:
+            if tx.template_id is None or tx.id in composite_ids:
                 continue
             out_edges = self.repo.list_edges(transformation_id=tx.id, direction="out")
             matching_total = [
@@ -1144,7 +1460,11 @@ class MetaCoreEngine:
                 for e in in_edges
                 if (st := self.repo.get_state(e.state_id)) is not None
             ]
-            primary_in = next((s for s in in_states if s.value_num is not None and s.value_num > 0), None)
+            causal_ids = {e.state_id for e in in_edges if e.role in ("consumes", "uses")}
+            primary_in = next(
+                (s for s in in_states if s.id in causal_ids and s.value_num is not None and s.value_num > 0),
+                next((s for s in in_states if s.value_num is not None and s.value_num > 0), None),
+            )
 
             if tx.formula.get("kind") == "product_and_split" and obs.value_num is not None and primary_in is not None:
                 template = self.repo.get_transformation(tx.template_id)
@@ -1187,17 +1507,6 @@ class MetaCoreEngine:
                     tx_formula["factor"] = new_factor
                     self.repo.update_transformation(tx.id, formula=tx_formula)
 
-                    # Update total predicted state and propagate to split outputs
-                    for _, total_st in matching_total:
-                        updated_total = self.repo.update_state(
-                            total_st.id,
-                            value_num=obs.value_num,
-                            value_sigma=obs.value_sigma if obs.value_sigma is not None else 0.0,
-                            source="measured",
-                            measurement_source=obs.measurement_source,
-                        )
-                        updated_state_ids.append(updated_total.id)
-
                     split_edges = [e for e in out_edges if e.ratio_mean is not None]
                     obs_total_val = GaussianValue(
                         obs.value_num,
@@ -1211,22 +1520,47 @@ class MetaCoreEngine:
                         for sp_edge in split_edges:
                             part_st = self.repo.get_state(sp_edge.state_id)
                             if part_st is not None:
-                                upd = self.repo.update_state(
-                                    part_st.id,
-                                    value_num=per_part.mean,
-                                    value_sigma=per_part.sigma,
-                                    source="derived",
-                                )
-                                updated_state_ids.append(upd.id)
+                                upd_part_fields: dict[str, Any] = {
+                                    "value_num": per_part.mean,
+                                    "value_sigma": per_part.sigma,
+                                    "source": "derived",
+                                }
+                                if obs.time_ms is not None:
+                                    upd_part_fields["time_ms"] = obs.time_ms
+                                if obs.sigma_seconds is not None:
+                                    upd_part_fields["sigma_seconds"] = obs.sigma_seconds
+                                upd = self.repo.update_state(part_st.id, **upd_part_fields)
+                                if upd.id not in updated_state_ids:
+                                    updated_state_ids.append(upd.id)
+
+            # Update predicted output state across all formula kinds (value + time)
+            for _, total_st in matching_total:
+                upd_total_fields: dict[str, Any] = {
+                    "source": "measured",
+                    "measurement_source": obs.measurement_source,
+                }
+                if obs.value_num is not None:
+                    upd_total_fields["value_num"] = obs.value_num
+                    upd_total_fields["value_sigma"] = (
+                        obs.value_sigma if obs.value_sigma is not None else 0.0
+                    )
+                if obs.time_ms is not None:
+                    upd_total_fields["time_ms"] = obs.time_ms
+                if obs.sigma_seconds is not None:
+                    upd_total_fields["sigma_seconds"] = obs.sigma_seconds
+                updated_total = self.repo.update_state(total_st.id, **upd_total_fields)
+                if updated_total.id not in updated_state_ids:
+                    updated_state_ids.append(updated_total.id)
+
+            if tx.parent_id is not None:
+                rolled_parents.add(tx.parent_id)
 
             # Duration calibration for timed steps
-            if (
-                obs.time_ms is not None
-                and tx.duration_seconds is not None
-                and in_states
-                and in_states[0].time_ms is not None
-            ):
-                observed_dur_s = (obs.time_ms - in_states[0].time_ms) / 1000.0
+            start_ref_ms = tx.meta.get("scheduled_start_ms")
+            if start_ref_ms is None and in_states and in_states[0].time_ms is not None:
+                start_ref_ms = in_states[0].time_ms
+            if obs.time_ms is not None and tx.duration_seconds is not None and start_ref_ms is not None:
+                observed_dur_s = (obs.time_ms - int(start_ref_ms)) / 1000.0
                 if observed_dur_s >= 0.0:
                     template = self.repo.get_transformation(tx.template_id)
                     prior_dur = GaussianValue(
@@ -1255,7 +1589,16 @@ class MetaCoreEngine:
                         if template.id not in calibrated_ids:
                             calibrated_ids.append(template.id)
 
-        updated_state_ids.extend(self._reapply_modifiers_for_observation(obs))
+        for parent_id in sorted(rolled_parents):
+            self._rollup_composite_tx(parent_id)
+
+        for sid in self._reapply_modifiers_for_observation(obs):
+            if sid not in updated_state_ids:
+                updated_state_ids.append(sid)
+
+        for sid in self.propagate_downstream(list(updated_state_ids)):
+            if sid not in updated_state_ids:
+                updated_state_ids.append(sid)
 
         return self._build_feedback(
             created_state_ids=[obs.id],
@@ -1265,11 +1608,171 @@ class MetaCoreEngine:
             summary=f"Beobachtung '{obs.label}' gespeichert.",
         )
 
+    def propagate_downstream(self, start_state_ids: Sequence[str]) -> list[str]:
+        """Propagate time and quantity updates topologically across chained planned transformations."""
+        if not start_state_ids:
+            return []
+        planned_txs = self.repo.list_transformations(modality="planned")
+        composite_ids = {t.parent_id for t in planned_txs if t.parent_id is not None}
+
+        queue: deque[str] = deque(start_state_ids)
+        visited_txs: set[str] = set()
+        updated_ids: list[str] = []
+        rolled_parents: set[str] = set()
+
+        while queue:
+            st_id = queue.popleft()
+            for in_edge in self.repo.list_edges(state_id=st_id, direction="in"):
+                tx = self.repo.get_transformation(in_edge.transformation_id)
+                if (
+                    tx is None
+                    or tx.modality != "planned"
+                    or tx.id in visited_txs
+                    or tx.id in composite_ids
+                ):
+                    continue
+                visited_txs.add(tx.id)
+
+                tx_in_edges = self.repo.list_edges(transformation_id=tx.id, direction="in")
+                in_states: list[State] = [
+                    st
+                    for e in tx_in_edges
+                    if (st := self.repo.get_state(e.state_id)) is not None
+                ]
+                if not in_states:
+                    continue
+
+                causal_ids = {e.state_id for e in tx_in_edges if e.role in ("consumes", "uses")}
+                causal_timed = [s for s in in_states if s.id in causal_ids and s.time_ms is not None]
+                all_timed = [s for s in in_states if s.time_ms is not None]
+                time_pool = causal_timed or all_timed
+                if time_pool:
+                    new_start_ms = max(s.time_ms for s in time_pool if s.time_ms is not None)
+                    sigmas = [s.sigma_seconds for s in time_pool if s.sigma_seconds is not None]
+                    base_time_sigma = max(sigmas) if sigmas else 0.0
+                else:
+                    new_start_ms = int(tx.meta.get("scheduled_start_ms", now_ms()))
+                    base_time_sigma = 0.0
+
+                tpl = self.repo.get_transformation(tx.template_id) if tx.template_id else None
+                modifiers = list(tx.formula.get("modifiers", []))
+                if tpl is not None and tpl.duration_source != "measured":
+                    _, mod_dur_s, mod_dur_sigma_s = self._apply_modifiers(
+                        output_value=None,
+                        duration_seconds=tpl.duration_seconds,
+                        duration_sigma_seconds=tpl.duration_sigma_seconds,
+                        modifiers=modifiers,
+                        inputs=in_states,
+                    )
+                else:
+                    mod_dur_s, mod_dur_sigma_s = tx.duration_seconds, tx.duration_sigma_seconds
+
+                tx_meta = dict(tx.meta)
+                tx_meta["scheduled_start_ms"] = new_start_ms
+                self.repo.update_transformation(
+                    tx.id,
+                    duration_seconds=mod_dur_s,
+                    duration_sigma_seconds=mod_dur_sigma_s,
+                    meta=tx_meta,
+                )
+
+                dur_s = mod_dur_s or 0.0
+                out_time_ms = new_start_ms + int(dur_s * 1000)
+                out_time_sigma = math.hypot(base_time_sigma, mod_dur_sigma_s or 0.0) or None
+
+                primary_in = self._pick_primary_input(in_states, tx_in_edges)
+                kind = tx.formula.get("kind", "duration_step")
+                mod_total: GaussianValue | None = None
+                if kind == "product_and_split" and primary_in.value_num is not None:
+                    factor_cfg = tx.formula.get("factor", {"mean": 1.0, "sigma": 0.0, "source": "ai_prior"})
+                    total = propagate_product(
+                        GaussianValue(
+                            primary_in.value_num,
+                            primary_in.value_sigma or 0.0,
+                            source=primary_in.source,
+                        ),
+                        GaussianValue(
+                            float(factor_cfg["mean"]),
+                            float(factor_cfg["sigma"]),
+                            source=factor_cfg.get("source", "ai_prior"),
+                        ),
+                    )
+                    mod_total, _, _ = self._apply_modifiers(
+                        output_value=total,
+                        duration_seconds=None,
+                        duration_sigma_seconds=None,
+                        modifiers=modifiers,
+                        inputs=in_states,
+                    )
+                elif kind == "recipe_mix":
+                    raw_total, _ = self._compute_recipe_mix(tx.formula, in_states)
+                    mod_total, _, _ = self._apply_modifiers(
+                        output_value=raw_total,
+                        duration_seconds=None,
+                        duration_sigma_seconds=None,
+                        modifiers=modifiers,
+                        inputs=in_states,
+                    )
+                else:
+                    d_val, d_sig = self._compute_duration_step_output(
+                        template=tpl,
+                        formula=tx.formula,
+                        primary_in=primary_in,
+                        modifiers=modifiers,
+                        inputs=in_states,
+                    )
+                    if d_val is not None:
+                        mod_total = GaussianValue(d_val, float(d_sig or 0.0), source="derived")
+
+                out_edges = self.repo.list_edges(transformation_id=tx.id, direction="out")
+                split_edges = [e for e in out_edges if e.ratio_mean is not None]
+                total_edges = [e for e in out_edges if e.ratio_mean is None]
+
+                for te in total_edges:
+                    out_st = self.repo.get_state(te.state_id)
+                    if out_st is None or out_st.modality != "predicted" or out_st.source == "measured":
+                        continue
+                    upd: dict[str, Any] = {"time_ms": out_time_ms, "sigma_seconds": out_time_sigma}
+                    if mod_total is not None:
+                        upd["value_num"] = mod_total.mean
+                        upd["value_sigma"] = mod_total.sigma
+                    self.repo.update_state(out_st.id, **upd)
+                    if out_st.id not in updated_ids:
+                        updated_ids.append(out_st.id)
+                    queue.append(out_st.id)
+
+                if split_edges and mod_total is not None:
+                    split_sigma = float(tx.formula.get("split_sigma", 0.0))
+                    per_part = propagate_split(mod_total, len(split_edges), split_sigma=split_sigma)
+                    for se in split_edges:
+                        part_st = self.repo.get_state(se.state_id)
+                        if part_st is None or part_st.modality != "predicted" or part_st.source == "measured":
+                            continue
+                        self.repo.update_state(
+                            part_st.id,
+                            value_num=per_part.mean,
+                            value_sigma=per_part.sigma,
+                            time_ms=out_time_ms,
+                            sigma_seconds=out_time_sigma,
+                        )
+                        if part_st.id not in updated_ids:
+                            updated_ids.append(part_st.id)
+                        queue.append(part_st.id)
+
+                if tx.parent_id is not None:
+                    rolled_parents.add(tx.parent_id)
+
+        for parent_id in sorted(rolled_parents):
+            self._rollup_composite_tx(parent_id)
+
+        return updated_ids
+
     def _reapply_modifiers_for_observation(self, obs: State) -> list[str]:
         """Re-evaluate duration modifiers on active planned transformations when a relevant observation arrives."""
         if obs.value_num is None:
             return []
         updated_ids: list[str] = []
+        rolled_parents: set[str] = set()
         for tx in self.repo.list_transformations(modality="planned"):
             if tx.template_id is None or tx.duration_source == "measured":
                 continue
@@ -1307,8 +1810,15 @@ class MetaCoreEngine:
             )
             scheduled_start_ms = tx.meta.get("scheduled_start_ms")
             if scheduled_start_ms is not None and mod_dur_s is not None:
-                in_sigmas_s = [s.sigma_seconds for s in in_states if s.sigma_seconds is not None]
-                base_time_sigma = max(in_sigmas_s) if in_sigmas_s else 0.0
+                causal_ids = {e.state_id for e in in_edges if e.role in ("consumes", "uses")}
+                causal_sigmas = [
+                    s.sigma_seconds
+                    for s in in_states
+                    if s.id in causal_ids and s.sigma_seconds is not None
+                ]
+                all_sigmas = [s.sigma_seconds for s in in_states if s.sigma_seconds is not None]
+                sigmas_pool = causal_sigmas or all_sigmas
+                base_time_sigma = max(sigmas_pool) if sigmas_pool else 0.0
                 out_time_ms = int(scheduled_start_ms) + int(mod_dur_s * 1000)
                 out_time_sigma = math.hypot(base_time_sigma, mod_dur_sigma_s or 0.0) or None
                 for out_edge in self.repo.list_edges(transformation_id=tx.id, direction="out"):
@@ -1321,6 +1831,10 @@ class MetaCoreEngine:
                         )
                         if out_st.id not in updated_ids:
                             updated_ids.append(out_st.id)
+            if tx.parent_id is not None:
+                rolled_parents.add(tx.parent_id)
+        for parent_id in sorted(rolled_parents):
+            self._rollup_composite_tx(parent_id)
         return updated_ids
 
     def _matching_trigger_templates(self, obs: State) -> list[str]:
@@ -1483,13 +1997,52 @@ class MetaCoreEngine:
                 if tx is not None and tx.modality == "planned":
                     cancelled_tx_ids.add(tx.id)
 
+            all_planned = self.repo.list_transformations(modality="planned")
+            active_goals = [
+                (g.entity_id, g.property_name)
+                for g in self.repo.list_states(modality="desired")
+                if g.id != goal_id
+            ]
+            changed = True
+            while changed:
+                changed = False
+                # Propagate downward to nested child steps
+                for ptx in all_planned:
+                    if ptx.parent_id in cancelled_tx_ids and ptx.id not in cancelled_tx_ids:
+                        cancelled_tx_ids.add(ptx.id)
+                        changed = True
+                # Propagate upward to upstream planned producers that have no remaining active consumers
+                for tx_id in list(cancelled_tx_ids):
+                    for in_edge in self.repo.list_edges(transformation_id=tx_id, direction="in"):
+                        in_st = self.repo.get_state(in_edge.state_id)
+                        if in_st is None or in_st.modality != "predicted":
+                            continue
+                        still_consumed = any(
+                            e.transformation_id not in cancelled_tx_ids
+                            and (ct := self.repo.get_transformation(e.transformation_id)) is not None
+                            and ct.modality == "planned"
+                            for e in self.repo.list_edges(state_id=in_st.id, direction="in")
+                        )
+                        still_desired = (in_st.entity_id, in_st.property_name) in active_goals
+                        if not still_consumed and not still_desired:
+                            for oe in self.repo.list_edges(state_id=in_st.id, direction="out"):
+                                up_tx = self.repo.get_transformation(oe.transformation_id)
+                                if (
+                                    up_tx is not None
+                                    and up_tx.modality == "planned"
+                                    and up_tx.id not in cancelled_tx_ids
+                                ):
+                                    cancelled_tx_ids.add(up_tx.id)
+                                    changed = True
+
             for tx_id in cancelled_tx_ids:
                 self.repo.update_transformation(tx_id, modality="cancelled")
                 for out_edge in self.repo.list_edges(transformation_id=tx_id, direction="out"):
                     st = self.repo.get_state(out_edge.state_id)
                     if st is not None and st.modality == "predicted":
                         self.repo.update_state(st.id, modality="cancelled")
-                        updated_ids.append(st.id)
+                        if st.id not in updated_ids:
+                            updated_ids.append(st.id)
                 for in_edge in self.repo.list_edges(transformation_id=tx_id, direction="in", role="uses"):
                     self.repo.update_edge(in_edge.id, resource_released=True)
             msg = f"Ziel '{goal.label}' abgebrochen; belegte uses-Ressourcen freigegeben."

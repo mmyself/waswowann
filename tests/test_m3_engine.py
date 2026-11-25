@@ -951,3 +951,220 @@ def test_live_duration_modifier_reapplies_unless_measured(repo: MetaCoreReposito
     assert pred_id not in fb_cold.updated_state_ids
     planned_after = repo.get_transformation(planned_tx.id)
     assert planned_after is not None and planned_after.duration_seconds == pytest.approx(10 * 86_400)
+
+
+def test_nested_composite_template_rollup_guards_and_chain_cascade(
+    repo: MetaCoreRepository,
+) -> None:
+    engine = MetaCoreEngine(repo)
+    batch = repo.create_entity(EntityCreate(name="Rezept-Testcharge", kind="worldline", category="rezept"))
+    oven = repo.create_entity(EntityCreate(name="Ofen", kind="worldline", category="rezept"))
+    t0 = 1_795_000_000_000
+
+    raw = repo.create_state(
+        StateCreate(
+            entity_id=batch.id,
+            modality="observed",
+            source="measured",
+            property_name="raw_g",
+            label="200 g Rohmasse",
+            value_num=200.0,
+            value_sigma=2.0,
+            value_unit="g",
+            time_ms=t0,
+        )
+    )
+    oven_slot = repo.create_state(
+        StateCreate(
+            entity_id=oven.id,
+            modality="observed",
+            source="measured",
+            property_name="occupancy",
+            label="Ofen bereit",
+            value_text="bereit",
+            time_ms=t0,
+        )
+    )
+    oven_temp = repo.create_state(
+        StateCreate(
+            entity_id=oven.id,
+            modality="observed",
+            source="measured",
+            property_name="oven_temp_c",
+            label="Ofen 190 °C",
+            value_num=190.0,
+            value_sigma=2.0,
+            value_unit="°C",
+            time_ms=t0,
+        )
+    )
+
+    tpl_macro = repo.create_transformation(
+        TransformationCreate(
+            name="Makro-Zubereitung",
+            modality="template",
+            driver="actor",
+            duration_seconds=3 * 86_400,
+            duration_sigma_seconds=0.3 * 86_400,
+            formula={
+                "kind": "duration_step",
+                "input_roles": {"raw_g": "consumes", "occupancy": "triggers", "oven_temp_c": "triggers"},
+            },
+        )
+    )
+    repo.create_transformation(
+        TransformationCreate(
+            name="1.1 Vorheizen",
+            modality="template",
+            driver="actor",
+            parent_id=tpl_macro.id,
+            duration_seconds=1 * 86_400,
+            duration_sigma_seconds=0.1 * 86_400,
+            formula={
+                "kind": "product_and_split",
+                "output_property": "heated_g",
+                "output_unit": "g",
+                "factor": {"mean": 1.5, "sigma": 0.05, "source": "ai_prior"},
+                "split_parts": 1,
+            },
+            meta={"step_order": 1},
+        )
+    )
+    repo.create_transformation(
+        TransformationCreate(
+            name="1.2 Garen",
+            modality="template",
+            driver="actor",
+            parent_id=tpl_macro.id,
+            duration_seconds=2 * 86_400,
+            duration_sigma_seconds=0.2 * 86_400,
+            formula={
+                "kind": "duration_step",
+                "inherit_input_value": True,
+                "output_property": "cooked_g",
+                "output_unit": "g",
+                "input_roles": {"heated_g": "consumes", "occupancy": "uses", "oven_temp_c": "triggers"},
+                "guards": [{"entity_id": oven.id, "property_name": "oven_temp_c", "min_value": 180.0}],
+            },
+            meta={"step_order": 2},
+        )
+    )
+    tpl_pack = repo.create_transformation(
+        TransformationCreate(
+            name="Verpacken",
+            modality="template",
+            driver="actor",
+            duration_seconds=1 * 86_400,
+            duration_sigma_seconds=0.1 * 86_400,
+            formula={
+                "kind": "duration_step",
+                "inherit_input_value": True,
+                "scale_mean": 0.9,
+                "scale_sigma": 0.0,
+                "output_property": "final_g",
+                "output_unit": "g",
+            },
+        )
+    )
+
+    fb_macro = engine.instantiate_template(
+        tpl_macro.id,
+        input_state_ids=[raw.id, oven_slot.id, oven_temp.id],
+        target_entity_id=batch.id,
+        start_time_ms=t0,
+    )
+    cooked_id = fb_macro.created_state_ids[0]
+    fb_pack = engine.instantiate_template(
+        tpl_pack.id,
+        input_state_ids=[cooked_id],
+        target_entity_id=batch.id,
+    )
+    final_id = fb_pack.created_state_ids[0]
+    goal = repo.create_state(
+        StateCreate(
+            entity_id=batch.id,
+            modality="desired",
+            source="user_goal",
+            property_name="final_g",
+            label="Mindestens 200 g bis Tag 6",
+            value_unit="g",
+            target_min=200.0,
+            target_latest_ms=t0 + 6 * 86_400_000,
+        )
+    )
+
+    planned_txs = repo.list_transformations(modality="planned")
+    parent_tx = next(t for t in planned_txs if t.template_id == tpl_macro.id)
+    children = [t for t in planned_txs if t.parent_id == parent_tx.id]
+    assert len(children) == 2
+    assert parent_tx.duration_seconds == pytest.approx(3 * 86_400)
+    assert parent_tx.duration_sigma_seconds == pytest.approx(math.hypot(0.1 * 86_400, 0.2 * 86_400))
+
+    heated_states = repo.list_states(entity_id=batch.id, property_name="heated_g")
+    assert len(heated_states) == 1
+    assert heated_states[0].meta.get("internal_to_parent_tx_id") == parent_tx.id
+    assert engine.evaluate_goal(goal.id).stage == 2
+
+    # Failing nested guard (140 °C < 180 °C) rolls up and breaks downstream goal -> Stage 4
+    fb_cold = engine.record_observation(
+        StateCreate(
+            entity_id=oven.id,
+            modality="observed",
+            source="measured",
+            property_name="oven_temp_c",
+            label="Ofen zu kalt (140 °C)",
+            value_num=140.0,
+            value_sigma=2.0,
+            value_unit="°C",
+            time_ms=t0 + 3600_000,
+        )
+    )
+    assert fb_cold.goal_evaluations[0].stage == 4
+    assert "vorbedingung" in fb_cold.goal_evaluations[0].broken_dimensions
+
+    engine.record_observation(
+        StateCreate(
+            entity_id=oven.id,
+            modality="observed",
+            source="measured",
+            property_name="oven_temp_c",
+            label="Ofen wieder heiß (190 °C)",
+            value_num=190.0,
+            value_sigma=2.0,
+            value_unit="°C",
+            time_ms=t0 + 7200_000,
+        )
+    )
+    assert engine.evaluate_goal(goal.id).stage == 2
+
+    # Downstream cascade: delayed cooked_g at +7 d shifts final_g to +8 d -> wann breaks goal
+    fb_delay = engine.record_observation(
+        StateCreate(
+            entity_id=batch.id,
+            modality="observed",
+            source="measured",
+            property_name="cooked_g",
+            label="Garen fertig (260 g nach 7 d)",
+            value_num=260.0,
+            value_sigma=4.0,
+            value_unit="g",
+            time_ms=t0 + 7 * 86_400_000,
+            sigma_seconds=600.0,
+        )
+    )
+    assert final_id in fb_delay.updated_state_ids
+    final_st = repo.get_state(final_id)
+    assert final_st is not None
+    assert final_st.time_ms == t0 + 8 * 86_400_000
+    assert final_st.value_num == pytest.approx(234.0)
+    assert fb_delay.goal_evaluations[0].stage == 4
+    assert "wann" in fb_delay.goal_evaluations[0].broken_dimensions
+
+    # Abort goal propagates downward to nested children and releases their uses edges
+    fb_abort = engine.resolve_escalation(goal.id, "abort_goal")
+    assert fb_abort.goal_evaluations[0].status == "cancelled"
+    assert repo.get_transformation(parent_tx.id).modality == "cancelled"  # type: ignore[union-attr]
+    for child in children:
+        assert repo.get_transformation(child.id).modality == "cancelled"  # type: ignore[union-attr]
+        for u_edge in repo.list_edges(transformation_id=child.id, direction="in", role="uses"):
+            assert u_edge.resource_released is True

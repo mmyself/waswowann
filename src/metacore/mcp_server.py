@@ -196,6 +196,7 @@ def create_server(config: Settings | None = None) -> FastMCP:
         name: str,
         driver: TransformationDriver = "actor",
         category: str = "general",
+        parent_id: str | None = None,
         duration_seconds: float | None = None,
         duration_sigma_seconds: float | None = None,
         duration_source: DurationSource = "ai_prior",
@@ -204,7 +205,7 @@ def create_server(config: Settings | None = None) -> FastMCP:
         formula: dict[str, Any] | None = None,
         meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Speichert eine wiederverwendbare zeit-/ortlose Vorlage (inkl. Formeln und optionaler ai_prior-Parameter)."""
+        """Speichert eine wiederverwendbare zeit-/ortlose Vorlage (inkl. Formeln, parent_id für Verschachtelung und ai_prior-Parameter)."""
         merged_meta = dict(meta or {})
         merged_meta.setdefault("category", category)
         tpl = repo.create_transformation(
@@ -212,6 +213,7 @@ def create_server(config: Settings | None = None) -> FastMCP:
                 name=name,
                 modality="template",
                 driver=driver,
+                parent_id=parent_id,
                 duration_seconds=duration_seconds,
                 duration_sigma_seconds=duration_sigma_seconds,
                 duration_source=duration_source,

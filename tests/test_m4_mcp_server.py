@@ -180,3 +180,102 @@ def test_mcp_entrypoint_script_importable(settings: Settings) -> None:
     assert callable(mcp_server.main)
     with pytest.raises((ValueError, ToolError)):
         asyncio.run(create_server(settings).call_tool("get_focus_briefing", {"horizon_days": -1}))
+
+
+def test_mcp_nested_composite_templates_via_parent_id(settings: Settings) -> None:
+    server = create_server(settings)
+
+    async def run_nested() -> None:
+        parent_res = _decode_tool_result(
+            await server.call_tool(
+                "define_template",
+                {
+                    "name": "Komposit-Körnerbrut",
+                    "driver": "actor",
+                    "category": "rezept",
+                    "formula": {"kind": "duration_step", "output_property": "spawn_g"},
+                },
+            )
+        )
+        parent_id = parent_res["template"]["id"]
+
+        await server.call_tool(
+            "define_template",
+            {
+                "name": "Schritt 1 Quellen",
+                "driver": "actor",
+                "category": "rezept",
+                "parent_id": parent_id,
+                "duration_seconds": 1 * 86_400,
+                "duration_sigma_seconds": 3600.0,
+                "formula": {
+                    "kind": "product_and_split",
+                    "output_property": "soaked_g",
+                    "output_unit": "g",
+                    "factor": {"mean": 1.75, "sigma": 0.1, "source": "ai_prior"},
+                    "split_parts": 1,
+                },
+                "meta": {"step_order": 1},
+            },
+        )
+        await server.call_tool(
+            "define_template",
+            {
+                "name": "Schritt 2 Impfen",
+                "driver": "nature",
+                "category": "rezept",
+                "parent_id": parent_id,
+                "duration_seconds": 14 * 86_400,
+                "duration_sigma_seconds": 86_400.0,
+                "formula": {
+                    "kind": "duration_step",
+                    "inherit_input_value": True,
+                    "output_property": "spawn_g",
+                    "output_unit": "g",
+                },
+                "meta": {"step_order": 2},
+            },
+        )
+
+        t0 = 1_795_000_000_000
+        obs = _decode_tool_result(
+            await server.call_tool(
+                "record_observation",
+                {
+                    "entity_id_or_name": "Charge_Nested_M4",
+                    "property_name": "mass",
+                    "label": "400 g Weizen",
+                    "category": "rezept",
+                    "value_num": 400.0,
+                    "value_sigma": 2.0,
+                    "value_unit": "g",
+                    "time_ms": t0,
+                },
+            )
+        )
+        inst = _decode_tool_result(
+            await server.call_tool(
+                "instantiate_template",
+                {
+                    "template_id": parent_id,
+                    "input_state_ids": [obs["observation_id"]],
+                    "target_entity_id_or_name": "Charge_Nested_M4",
+                    "start_time_ms": t0,
+                },
+            )
+        )
+        assert len(inst["created_state_ids"]) == 1
+
+        world = _decode_tool_result(
+            await server.call_tool("inspect_worldline", {"entity_id_or_name": "Charge_Nested_M4"})
+        )
+        planned = [t for t in world["transformations"] if t["modality"] == "planned"]
+        parent_planned = next(t for t in planned if t["template_id"] == parent_id)
+        children = [t for t in planned if t["parent_id"] == parent_planned["id"]]
+        assert len(children) == 2
+        assert parent_planned["duration_seconds"] == pytest.approx(15 * 86_400)
+        spawn_pred = next(s for s in world["future_predicted"] if s["property_name"] == "spawn_g")
+        assert spawn_pred["value_num"] == pytest.approx(700.0)
+        assert spawn_pred["time_ms"] == t0 + 15 * 86_400_000
+
+    asyncio.run(run_nested())

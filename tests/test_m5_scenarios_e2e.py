@@ -18,6 +18,7 @@ from metacore.repository import MetaCoreRepository
 from metacore.seeds import (
     seed_igel_stachelbart,
     seed_koernerbrut,
+    seed_pilz_lebenszyklus,
     seed_riesenschirmling,
     seed_roboter_wasser,
     seed_substrat_rezept,
@@ -389,6 +390,93 @@ def test_e2e_substrat_rezept_ratios_and_modifiers(repo: MetaCoreRepository) -> N
             value_unit="g",
             time_ms=1_795_001_200_000,
         )
+    )
+    assert fb_ok.goal_evaluations[0].stage == 2
+    assert fb_ok.goal_evaluations[0].status == "on_track"
+
+
+def test_e2e_pilz_lebenszyklus_nested_and_cascade(repo: MetaCoreRepository) -> None:
+    engine = MetaCoreEngine(repo)
+    t0 = 1_795_000_000_000
+    ids = seed_pilz_lebenszyklus(repo, engine, t0_ms=t0)
+
+    # Phase 0: Rolled-up composite Step 1 (15.5 d), chained Substrat (25.5 d), Ernte (33.5 d) -> Stage 2
+    planned = repo.list_transformations(modality="planned")
+    child_txs = [t for t in planned if t.parent_id == ids["spawn_parent_tx_id"]]
+    assert len(child_txs) == 3
+
+    pred_spawn = repo.get_state(ids["pred_spawn_id"])
+    pred_block = repo.get_state(ids["pred_block_id"])
+    pred_harvest = repo.get_state(ids["pred_harvest_id"])
+    assert pred_spawn is not None and pred_spawn.time_ms == t0 + int(15.5 * 86_400_000)
+    assert pred_block is not None and pred_block.value_num == pytest.approx(3200.0)
+    assert pred_block.time_ms == t0 + int(25.5 * 86_400_000)
+    assert pred_harvest is not None and pred_harvest.time_ms == t0 + int(33.5 * 86_400_000)
+    assert engine.evaluate_goal(ids["goal_id"]).stage == 2
+
+    # Phase 1: +5 d delay & 650 g spawn observation cascades to block (30.5 d) and harvest (38.5 d) -> Stage 3
+    fb_delay = engine.record_observation(
+        StateCreate(
+            entity_id=ids["charge_id"],
+            modality="observed",
+            source="measured",
+            measurement_source="Waage_Kueche",
+            property_name="spawn_mass",
+            label="Körnerbrut verzögert (650 g nach 20,5 d)",
+            value_num=650.0,
+            value_sigma=10.0,
+            value_unit="g",
+            time_ms=t0 + int(20.5 * 86_400_000),
+            sigma_seconds=3600.0,
+        )
+    )
+    assert ids["pred_block_id"] in fb_delay.updated_state_ids
+    assert ids["pred_harvest_id"] in fb_delay.updated_state_ids
+    block_delayed = repo.get_state(ids["pred_block_id"])
+    harvest_delayed = repo.get_state(ids["pred_harvest_id"])
+    assert block_delayed is not None and block_delayed.value_num == pytest.approx(3150.0)
+    assert block_delayed.time_ms == t0 + int(30.5 * 86_400_000)
+    assert harvest_delayed is not None and harvest_delayed.time_ms == t0 + int(38.5 * 86_400_000)
+    assert fb_delay.goal_evaluations[0].stage == 3
+    assert fb_delay.goal_evaluations[0].status == "at_risk"
+
+    # Phase 2: Sub-step 1.2 guard breach (Autoklav 105 °C < 121 °C) rolls up to goal -> Stage 4
+    fb_fail = engine.record_observation(
+        StateCreate(
+            entity_id=ids["autoclave_id"],
+            modality="observed",
+            source="measured",
+            measurement_source="Autoklav_Sensor",
+            property_name="steril_temp_c",
+            label="Autoklav nur 105 °C",
+            value_num=105.0,
+            value_sigma=1.0,
+            value_unit="°C",
+            time_ms=t0 + 21 * 86_400_000,
+        )
+    )
+    assert fb_fail.goal_evaluations[0].stage == 4
+    assert "vorbedingung" in fb_fail.goal_evaluations[0].broken_dimensions
+
+    # Phase 3: Re-sterilize at 122 °C and widen harvest deadline to Tag 42 -> Stage 2
+    engine.record_observation(
+        StateCreate(
+            entity_id=ids["autoclave_id"],
+            modality="observed",
+            source="measured",
+            measurement_source="Autoklav_Sensor",
+            property_name="steril_temp_c",
+            label="Nachsterilisation 122 °C",
+            value_num=122.0,
+            value_sigma=0.3,
+            value_unit="°C",
+            time_ms=t0 + 21 * 86_400_000 + 3_600_000,
+        )
+    )
+    fb_ok = engine.resolve_escalation(
+        ids["goal_id"],
+        "widen_tolerance",
+        {"target_latest_ms": t0 + 42 * 86_400_000},
     )
     assert fb_ok.goal_evaluations[0].stage == 2
     assert fb_ok.goal_evaluations[0].status == "on_track"

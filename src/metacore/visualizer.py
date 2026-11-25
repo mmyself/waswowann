@@ -19,6 +19,7 @@ from metacore.repository import MetaCoreRepository
 from metacore.seeds import (
     seed_igel_stachelbart,
     seed_koernerbrut,
+    seed_pilz_lebenszyklus,
     seed_riesenschirmling,
     seed_roboter_wasser,
     seed_substrat_rezept,
@@ -550,13 +551,115 @@ def _run_substrat_rezept_scenario() -> dict[str, Any]:
     }
 
 
+def _run_pilz_lebenszyklus_scenario() -> dict[str, Any]:
+    with _temp_engine("pilz_lebenszyklus.sqlite3") as (repo, engine):
+        t0 = 1_795_000_000_000
+        ids = seed_pilz_lebenszyklus(repo, engine, t0_ms=t0)
+        phase_0 = export_graph_snapshot(
+            repo,
+            engine,
+            title="Übersicht: 3 Makro-Schritte (Stufe 2)",
+            subtitle=(
+                "Erwartete Ernte Tag 33,5 ± 2,1 d (380 g ≥ 250 g bis Tag 38). "
+                "Makro-Schritt 1 kapselt 3 Unterschritte (aufklappbar)."
+            ),
+        )
+
+        fb_delay = engine.record_observation(
+            StateCreate(
+                entity_id=ids["charge_id"],
+                modality="observed",
+                source="measured",
+                measurement_source="Waage_Kueche",
+                property_name="spawn_mass",
+                label="Körnerbrut verzögert (650 g nach 20,5 d)",
+                value_num=650.0,
+                value_sigma=10.0,
+                value_unit="g",
+                time_ms=t0 + int(20.5 * 86_400_000),
+                sigma_seconds=3600.0,
+            )
+        )
+        phase_1 = export_graph_snapshot(
+            repo,
+            engine,
+            title="Verzögerung +5 d in Schritt 1 → Kaskade (Stufe 3)",
+            subtitle=(
+                "+5 d in Körnerbrut schiebt Substrat (Tag 30,5) & Ernte (Tag 38,5) über Frist Tag 38 → Stufe 3."
+            ),
+            last_feedback=fb_delay,
+        )
+
+        fb_fail = engine.record_observation(
+            StateCreate(
+                entity_id=ids["autoclave_id"],
+                modality="observed",
+                source="measured",
+                measurement_source="Autoklav_Sensor",
+                property_name="steril_temp_c",
+                label="Autoklav nur 105 °C (< 121 °C!)",
+                value_num=105.0,
+                value_sigma=1.0,
+                value_unit="°C",
+                time_ms=t0 + 21 * 86_400_000,
+            )
+        )
+        phase_2 = export_graph_snapshot(
+            repo,
+            engine,
+            title="Fehler im Detail-Unterschritt: Autoklav 105 °C (Stufe 4)",
+            subtitle=(
+                "Unterschritt 1.2 (Sterilisieren) bricht im Detail und rollt automatisch bis zum Ziel hoch → Stufe 4."
+            ),
+            last_feedback=fb_fail,
+        )
+
+        engine.record_observation(
+            StateCreate(
+                entity_id=ids["autoclave_id"],
+                modality="observed",
+                source="measured",
+                measurement_source="Autoklav_Sensor",
+                property_name="steril_temp_c",
+                label="Nachsterilisation 122 °C",
+                value_num=122.0,
+                value_sigma=0.3,
+                value_unit="°C",
+                time_ms=t0 + 21 * 86_400_000 + 3_600_000,
+            )
+        )
+        fb_resolved = engine.resolve_escalation(
+            ids["goal_id"],
+            "widen_tolerance",
+            {"target_latest_ms": t0 + 42 * 86_400_000},
+        )
+        phase_3 = export_graph_snapshot(
+            repo,
+            engine,
+            title="Behoben: 122 °C + Frist Tag 42 (Stufe 2)",
+            subtitle="Sterilisation ok (122 °C) und Erntefrist auf Tag 42 erweitert → gesamte Kette wieder grün.",
+            last_feedback=fb_resolved,
+        )
+
+    return {
+        "id": "pilz_lebenszyklus",
+        "title": "6. Pilz-Lebenszyklus (Kette & Detail-Zoom)",
+        "description": (
+            "Durchgehende Kette (Körnerbrut → Substrat → Fruchtung → Ernte) mit verschachtelten "
+            "Unterschritten (Einweichen/Autoklav/Inkubator), Kaskaden-Propagation und Detail-Zoom."
+        ),
+        "phases": [phase_0, phase_1, phase_2, phase_3],
+    }
+
+
 def build_demo_scenarios_payload() -> dict[str, Any]:
-    """Execute all 5 reference scenarios against real temp SQLite DBs and export snapshots."""
+    """Execute all 6 reference scenarios against real temp SQLite DBs and export snapshots."""
     koernerbrut = _run_koernerbrut_scenario()
     riesenschirmling = _run_riesenschirmling_scenario()
     roboter_wasser = _run_roboter_wasser_scenario()
     igel_stachelbart = _run_igel_stachelbart_scenario()
     substrat_rezept = _run_substrat_rezept_scenario()
+    pilz_lebenszyklus = _run_pilz_lebenszyklus_scenario()
     return {
         "title": "WoWannWas · Zukunftsgraph (Live MetaCore-Engine)",
         "generated_by": "metacore.visualizer",
@@ -571,6 +674,7 @@ def build_demo_scenarios_payload() -> dict[str, Any]:
             "roboter_wasser",
             "igel_stachelbart",
             "substrat_rezept",
+            "pilz_lebenszyklus",
         ],
         "scenarios": {
             "koernerbrut": koernerbrut,
@@ -578,6 +682,7 @@ def build_demo_scenarios_payload() -> dict[str, Any]:
             "roboter_wasser": roboter_wasser,
             "igel_stachelbart": igel_stachelbart,
             "substrat_rezept": substrat_rezept,
+            "pilz_lebenszyklus": pilz_lebenszyklus,
         },
     }
 
@@ -721,6 +826,32 @@ body {
   background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
 }
 svg { display: block; width: 100%; height: auto; min-width: 780px; }
+.zoom-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+.zoom-btn {
+  border: 1px solid var(--tpl);
+  background: #ffffff;
+  color: var(--tpl);
+  border-radius: 7px;
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.zoom-btn.expanded {
+  background: var(--tpl);
+  color: #ffffff;
+}
+.zoom-chip { cursor: pointer; }
 .legend {
   display: flex;
   flex-wrap: wrap;
@@ -870,9 +1001,113 @@ _HTML_SCRIPT = r"""
   let activePhaseIdx = 0;
   let activeTableTab = "states";
   let selectedItem = null; // { kind: "state" | "tx", id: string }
+  const expandedParentIds = new Set();
 
   const getScenario = () => PAYLOAD.scenarios[activeScenarioId];
   const getSnap = () => getScenario().phases[activePhaseIdx];
+
+  function getChildCountByParent(snap) {
+    const counts = {};
+    for (const t of snap.transformations || []) {
+      if (t.parent_id) {
+        counts[t.parent_id] = (counts[t.parent_id] || 0) + 1;
+      }
+    }
+    return counts;
+  }
+
+  function latestObsState(snap, entityId, propertyName) {
+    const matches = (snap.states || []).filter(
+      (s) => s.modality === "observed" && (!entityId || s.entity_id === entityId) && (!propertyName || s.property_name === propertyName)
+    );
+    if (!matches.length) return null;
+    matches.sort((a, b) => (a.time_ms ?? a.created_at_ms) - (b.time_ms ?? b.created_at_ms));
+    return matches[matches.length - 1];
+  }
+
+  function evaluateTxGuardsOk(tx, snap) {
+    const guards = (tx.formula && tx.formula.guards) || [];
+    if (!guards.length) return true;
+    const logic = String((tx.formula && tx.formula.guard_logic) || "AND").toUpperCase();
+    const checks = guards.map((g) => {
+      if (g.kind === "ratio") {
+        const num = latestObsState(snap, g.numerator_entity_id, g.numerator_property);
+        const den = latestObsState(snap, g.denominator_entity_id, g.denominator_property);
+        if (!num || !den || num.value_num === null || den.value_num === null || Math.abs(den.value_num) < 1e-12) return false;
+        const r = num.value_num / den.value_num;
+        if (g.min_ratio !== undefined && g.min_ratio !== null && r < Number(g.min_ratio)) return false;
+        if (g.max_ratio !== undefined && g.max_ratio !== null && r > Number(g.max_ratio)) return false;
+        return true;
+      }
+      const st = latestObsState(snap, g.entity_id, g.property_name);
+      if (!st) return false;
+      if (g.forbidden_texts && st.value_text && g.forbidden_texts.includes(st.value_text)) return false;
+      if (g.required_text && st.value_text !== g.required_text) return false;
+      if (st.value_num !== null && st.value_num !== undefined) {
+        if (g.min_value !== undefined && g.min_value !== null && st.value_num < Number(g.min_value)) return false;
+        if (g.max_value !== undefined && g.max_value !== null && st.value_num > Number(g.max_value)) return false;
+      }
+      return true;
+    });
+    return logic === "OR" ? checks.some(Boolean) : checks.every(Boolean);
+  }
+
+  function reachesState(startTxId, targetStateId, snap) {
+    if (!targetStateId) return false;
+    const q = [startTxId];
+    const seen = new Set();
+    while (q.length > 0) {
+      const tid = q.shift();
+      if (seen.has(tid)) continue;
+      seen.add(tid);
+      const outEdges = (snap.edges || []).filter((e) => e.transformation_id === tid && e.direction === "out");
+      for (const oe of outEdges) {
+        if (oe.state_id === targetStateId) return true;
+        for (const ie of (snap.edges || []).filter((e) => e.state_id === oe.state_id && e.direction === "in")) {
+          if (!seen.has(ie.transformation_id)) q.push(ie.transformation_id);
+        }
+      }
+    }
+    return false;
+  }
+
+  function resolveTxStatus(tx, snap) {
+    if (tx.modality === "cancelled") return "cancelled";
+    if (tx.modality === "template") return "template";
+    if (tx.modality === "happened") return "happened";
+    const conflicts = snap.uses_conflicts || [];
+    if (conflicts.some((c) => c.transformation_a_id === tx.id || c.transformation_b_id === tx.id)) {
+      return "at_risk";
+    }
+    const outEdges = (snap.edges || []).filter((e) => e.transformation_id === tx.id && e.direction === "out");
+    if (outEdges.length > 0 && outEdges.every((e) => e.outcome === "not_chosen" || !e.is_selected)) {
+      return "cancelled";
+    }
+    const children = (snap.transformations || []).filter((c) => c.parent_id === tx.id && c.modality === "planned");
+    if (children.some((c) => !evaluateTxGuardsOk(c, snap))) {
+      return "broken";
+    }
+    if (!evaluateTxGuardsOk(tx, snap)) {
+      return "broken";
+    }
+    for (const ev of snap.goal_evaluations || []) {
+      const alt = (ev.alternative_branches || []).find((b) => b.transformation_id === tx.id);
+      if (alt) {
+        if (alt.broken_dimensions && alt.broken_dimensions.length > 0) return "broken";
+        return alt.is_selected ? ev.status : "cancelled";
+      }
+      if (outEdges.some((e) => e.state_id === ev.predicted_state_id)) return ev.status;
+    }
+    for (const ev of snap.goal_evaluations || []) {
+      if (ev.predicted_state_id && reachesState(tx.id, ev.predicted_state_id, snap)) {
+        if (ev.status === "at_risk") return "at_risk";
+        if (ev.status === "broken" && (ev.broken_dimensions || []).includes("wann") && !(ev.broken_dimensions || []).includes("vorbedingung")) {
+          return "broken";
+        }
+      }
+    }
+    return "on_track";
+  }
 
   function resolveStateStatus(st, snap, txMap) {
     if (st.modality === "cancelled") return "cancelled";
@@ -905,28 +1140,12 @@ _HTML_SCRIPT = r"""
     }
     const entityGoal = evals.find((g) => g.entity_id === st.entity_id && g.property_name === st.property_name);
     if (entityGoal) return entityGoal.status;
-    return "on_track";
-  }
-
-  function resolveTxStatus(tx, snap) {
-    if (tx.modality === "cancelled") return "cancelled";
-    if (tx.modality === "template") return "template";
-    if (tx.modality === "happened") return "happened";
-    const conflicts = snap.uses_conflicts || [];
-    if (conflicts.some((c) => c.transformation_a_id === tx.id || c.transformation_b_id === tx.id)) {
-      return "at_risk";
-    }
-    const outEdges = (snap.edges || []).filter((e) => e.transformation_id === tx.id && e.direction === "out");
-    if (outEdges.length > 0 && outEdges.every((e) => e.outcome === "not_chosen" || !e.is_selected)) {
-      return "cancelled";
-    }
-    for (const ev of snap.goal_evaluations || []) {
-      const alt = (ev.alternative_branches || []).find((b) => b.transformation_id === tx.id);
-      if (alt) {
-        if (alt.broken_dimensions && alt.broken_dimensions.length > 0) return "broken";
-        return alt.is_selected ? ev.status : "cancelled";
+    for (const ie of incoming) {
+      const ptx = txMap[ie.transformation_id];
+      if (ptx) {
+        const pStatus = resolveTxStatus(ptx, snap);
+        if (pStatus === "broken" || pStatus === "at_risk") return pStatus;
       }
-      if (outEdges.some((e) => e.state_id === ev.predicted_state_id)) return ev.status;
     }
     return "on_track";
   }
@@ -949,41 +1168,171 @@ _HTML_SCRIPT = r"""
   }
 
   function renderGraphSvg(snap) {
-    const states = snap.states || [];
-    const txs = snap.transformations || [];
-    const edges = snap.edges || [];
-    const txMap = Object.fromEntries(txs.map((t) => [t.id, t]));
+    const allStates = snap.states || [];
+    const allTxs = snap.transformations || [];
+    const allEdges = snap.edges || [];
+    const txMap = Object.fromEntries(allTxs.map((t) => [t.id, t]));
     const entMap = Object.fromEntries((snap.entities || []).map((e) => [e.id, e]));
+    const childCounts = getChildCountByParent(snap);
 
-    const colObs = states.filter((s) => s.modality === "observed");
-    const colTx = txs;
-    const colPred = states.filter((s) => s.modality === "predicted" || (s.modality === "cancelled" && s.source !== "user_goal"));
-    const colGoal = states.filter((s) => s.modality === "desired" || (s.modality === "cancelled" && s.source === "user_goal"));
+    const visibleTxs = allTxs.filter((tx) => {
+      if (tx.parent_id && !expandedParentIds.has(tx.parent_id)) return false;
+      if (tx.modality === "planned" && childCounts[tx.id] > 0 && expandedParentIds.has(tx.id)) return false;
+      return true;
+    });
+    const visibleTxIds = new Set(visibleTxs.map((t) => t.id));
 
-    const maxRows = Math.max(colObs.length, colTx.length, colPred.length, colGoal.length, 1);
-    const rowGap = 86;
-    const topPad = 56;
-    const height = Math.max(360, topPad + maxRows * rowGap + 36);
-    const width = 980;
+    const visibleStates = allStates.filter((st) => {
+      const owner = st.meta && st.meta.internal_to_parent_tx_id;
+      if (owner && !expandedParentIds.has(owner)) return false;
+      return true;
+    });
+    const visibleStateIds = new Set(visibleStates.map((s) => s.id));
+
+    const visibleEdges = allEdges.filter(
+      (e) => visibleTxIds.has(e.transformation_id) && visibleStateIds.has(e.state_id)
+    );
+
+    const isChainGraph = visibleStates.some(
+      (s) => (s.modality === "predicted" || s.modality === "cancelled") && visibleEdges.some((e) => e.direction === "in" && e.state_id === s.id)
+    );
+
     const pos = new Map();
+    const rowGap = 86;
+    const topPad = 58;
+    let width = 980;
+    let height = 360;
+    let nowX = 252;
+    let columnHeadersHtml = "";
 
-    const layoutCol = (items, xCenter, kind) => {
-      const n = items.length;
-      if (n === 0) return;
-      const totalH = (n - 1) * rowGap;
-      const startY = topPad + (height - topPad - 36 - totalH) / 2;
-      items.forEach((item, idx) => {
-        pos.set(`${kind}:${item.id}`, { x: xCenter, y: startY + idx * rowGap });
+    if (!isChainGraph) {
+      const colObs = visibleStates.filter((s) => s.modality === "observed");
+      const colTx = visibleTxs;
+      const colPred = visibleStates.filter((s) => s.modality === "predicted" || (s.modality === "cancelled" && s.source !== "user_goal"));
+      const colGoal = visibleStates.filter((s) => s.modality === "desired" || (s.modality === "cancelled" && s.source === "user_goal"));
+
+      const maxRows = Math.max(colObs.length, colTx.length, colPred.length, colGoal.length, 1);
+      height = Math.max(360, topPad + maxRows * rowGap + 36);
+
+      const layoutCol = (items, xCenter, kind) => {
+        const n = items.length;
+        if (n === 0) return;
+        const totalH = (n - 1) * rowGap;
+        const startY = topPad + (height - topPad - 36 - totalH) / 2;
+        items.forEach((item, idx) => {
+          pos.set(`${kind}:${item.id}`, { x: xCenter, y: startY + idx * rowGap });
+        });
+      };
+
+      layoutCol(colObs, 120, "state");
+      layoutCol(colTx, 395, "tx");
+      layoutCol(colPred, 650, "state");
+      layoutCol(colGoal, 875, "state");
+
+      columnHeadersHtml =
+        `<text x="120" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="#475569">OBSERVED (Fakten / Vergangen)</text>` +
+        `<text x="395" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="#475569">TRANSFORMATIONEN / TEMPLATES</text>` +
+        `<text x="650" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="#475569">PREDICTED (Vorhersagen)</text>` +
+        `<text x="875" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="#475569">DESIRED (Ziele)</text>`;
+    } else {
+      const txCol = {};
+      const stateCol = {};
+      visibleStates.forEach((s) => {
+        stateCol[s.id] = s.modality === "observed" ? 0 : 2;
       });
-    };
+      visibleTxs.forEach((tx) => {
+        if (tx.modality !== "template") txCol[tx.id] = 1;
+      });
 
-    layoutCol(colObs, 120, "state");
-    layoutCol(colTx, 395, "tx");
-    layoutCol(colPred, 650, "state");
-    layoutCol(colGoal, 875, "state");
+      const plannedVisible = visibleTxs.filter((tx) => tx.modality !== "template");
+      for (let iter = 0; iter < plannedVisible.length + 4; iter++) {
+        for (const tx of plannedVisible) {
+          const inPredCols = visibleEdges
+            .filter((e) => e.transformation_id === tx.id && e.direction === "in")
+            .map((e) => visibleStates.find((s) => s.id === e.state_id))
+            .filter((s) => s && s.modality !== "observed")
+            .map((s) => stateCol[s.id] ?? 0);
+          if (inPredCols.length > 0) {
+            txCol[tx.id] = Math.max(txCol[tx.id], Math.max(...inPredCols) + 1);
+          }
+          for (const oe of visibleEdges.filter((e) => e.transformation_id === tx.id && e.direction === "out")) {
+            const os = visibleStates.find((s) => s.id === oe.state_id);
+            if (os && os.modality !== "desired") {
+              stateCol[os.id] = Math.max(stateCol[os.id] || 0, txCol[tx.id] + 1);
+            }
+          }
+        }
+      }
+
+      // Place each observed state immediately left of its earliest consuming/triggering tx
+      for (const s of visibleStates) {
+        if (s.modality !== "observed") continue;
+        const linkedCols = visibleEdges
+          .filter((e) => e.state_id === s.id && e.direction === "in" && txCol[e.transformation_id] !== undefined)
+          .map((e) => txCol[e.transformation_id]);
+        stateCol[s.id] = linkedCols.length > 0 ? Math.max(0, Math.min(...linkedCols) - 1) : 0;
+      }
+
+      // Align template boxes under their instantiated planned transformation column
+      for (const tx of visibleTxs) {
+        if (tx.modality !== "template") continue;
+        const matchPlanned = visibleTxs.find((p) => p.modality !== "template" && p.template_id === tx.id);
+        txCol[tx.id] = matchPlanned ? txCol[matchPlanned.id] : 1;
+      }
+
+      let maxChainCol = 2;
+      for (const c of Object.values(txCol)) maxChainCol = Math.max(maxChainCol, c);
+      for (const s of visibleStates) {
+        if (s.modality !== "desired" && !(s.modality === "cancelled" && s.source === "user_goal")) {
+          maxChainCol = Math.max(maxChainCol, stateCol[s.id] || 0);
+        }
+      }
+      const goalCol = maxChainCol + 1;
+      for (const s of visibleStates) {
+        if (s.modality === "desired" || (s.modality === "cancelled" && s.source === "user_goal")) {
+          stateCol[s.id] = goalCol;
+        }
+      }
+
+      const colStep = 230;
+      width = Math.max(980, 240 + goalCol * colStep);
+      nowX = 120 + Math.round(colStep * 0.5);
+
+      const buckets = {};
+      for (const s of visibleStates) {
+        const c = stateCol[s.id] ?? 0;
+        (buckets[c] = buckets[c] || []).push({ kind: "state", item: s, rank: s.modality === "predicted" ? 0 : 1 });
+      }
+      for (const tx of visibleTxs) {
+        const c = txCol[tx.id] ?? 1;
+        (buckets[c] = buckets[c] || []).push({ kind: "tx", item: tx, rank: tx.modality === "template" ? 3 : 2 });
+      }
+      for (const c of Object.keys(buckets)) {
+        buckets[c].sort((a, b) => a.rank - b.rank);
+      }
+
+      const maxRows = Math.max(1, ...Object.values(buckets).map((b) => b.length));
+      height = Math.max(400, topPad + maxRows * rowGap + 40);
+
+      for (const [cStr, items] of Object.entries(buckets)) {
+        const xCenter = 120 + Number(cStr) * colStep;
+        const n = items.length;
+        const totalH = (n - 1) * rowGap;
+        const startY = topPad + (height - topPad - 36 - totalH) / 2;
+        items.forEach((entry, idx) => {
+          pos.set(`${entry.kind}:${entry.item.id}`, { x: xCenter, y: startY + idx * rowGap });
+        });
+      }
+
+      columnHeadersHtml =
+        `<text x="120" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="#475569">OBSERVED (Start)</text>` +
+        `<text x="${120 + Math.floor(goalCol / 2) * colStep}" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="#475569">ZUKUNFTSKETTE (Schritte &amp; Prognosen)</text>` +
+        `<text x="${120 + goalCol * colStep}" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="#475569">DESIRED (Ziel)</text>`;
+    }
 
     const parts = [];
-    parts.push(`<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">`);
+    const minSvgWidth = isChainGraph ? width : 780;
+    parts.push(`<svg viewBox="0 0 ${width} ${height}" style="min-width:${minSvgWidth}px" xmlns="http://www.w3.org/2000/svg">`);
     parts.push(`
       <defs>
         <marker id="arr-slate" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
@@ -999,13 +1348,43 @@ _HTML_SCRIPT = r"""
     `);
 
     // Column headers & JETZT axis
-    parts.push(`<text x="120" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="#475569">OBSERVED (Fakten / Vergangen)</text>`);
-    parts.push(`<line x1="252" y1="16" x2="252" y2="${height - 14}" stroke="#0f172a" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.35"/>`);
-    parts.push(`<rect x="226" y="10" width="52" height="18" rx="9" fill="#0f172a"/>`);
-    parts.push(`<text x="252" y="22" text-anchor="middle" font-size="10" font-weight="700" fill="#ffffff">JETZT</text>`);
-    parts.push(`<text x="395" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="#475569">TRANSFORMATIONEN / TEMPLATES</text>`);
-    parts.push(`<text x="650" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="#475569">PREDICTED (Vorhersagen)</text>`);
-    parts.push(`<text x="875" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="#475569">DESIRED (Ziele)</text>`);
+    parts.push(columnHeadersHtml);
+    parts.push(`<line x1="${nowX}" y1="16" x2="${nowX}" y2="${height - 14}" stroke="#0f172a" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.35"/>`);
+    parts.push(`<rect x="${nowX - 26}" y="10" width="52" height="18" rx="9" fill="#0f172a"/>`);
+    parts.push(`<text x="${nowX}" y="22" text-anchor="middle" font-size="10" font-weight="700" fill="#ffffff">JETZT</text>`);
+
+    // Subtle group box around any expanded composite parent's visible children & internal states
+    for (const parentId of expandedParentIds) {
+      const parentTx = txMap[parentId];
+      if (!parentTx) continue;
+      const boxPts = [];
+      for (const tx of visibleTxs) {
+        if (tx.parent_id === parentId) {
+          const pt = pos.get(`tx:${tx.id}`);
+          if (pt) boxPts.push(pt);
+        }
+      }
+      for (const st of visibleStates) {
+        if (st.meta && st.meta.internal_to_parent_tx_id === parentId) {
+          const pt = pos.get(`state:${st.id}`);
+          if (pt) boxPts.push(pt);
+        }
+      }
+      if (boxPts.length > 0) {
+        const minX = Math.min(...boxPts.map((p) => p.x)) - 104;
+        const maxX = Math.max(...boxPts.map((p) => p.x)) + 104;
+        const minY = Math.min(...boxPts.map((p) => p.y)) - 44;
+        const maxY = Math.max(...boxPts.map((p) => p.y)) + 42;
+        parts.push(
+          `<rect x="${minX}" y="${minY}" width="${maxX - minX}" height="${maxY - minY}" rx="14" ` +
+          `fill="#f5f3ff" fill-opacity="0.45" stroke="#7c3aed" stroke-width="1.6" stroke-dasharray="6 4"/>`
+        );
+        parts.push(
+          `<text x="${minX + 12}" y="${minY + 15}" font-size="10.5" font-weight="700" fill="#5b21b6">` +
+          `▼ ${esc(parentTx.name)} (Detailansicht)</text>`
+        );
+      }
+    }
 
     // Goal -> Predicted alignment connectors (dashed target matching link)
     for (const ev of snap.goal_evaluations || []) {
@@ -1022,15 +1401,15 @@ _HTML_SCRIPT = r"""
 
     // Explicit DB edges
     const conflicts = snap.uses_conflicts || [];
-    for (const e of edges) {
+    for (const e of visibleEdges) {
       const sPos = pos.get(`state:${e.state_id}`);
       const tPos = pos.get(`tx:${e.transformation_id}`);
       if (!sPos || !tPos) continue;
-      const x1 = e.direction === "in" ? sPos.x + 88 : tPos.x + 88;
+      const x1 = e.direction === "in" ? sPos.x + 84 : tPos.x + 86;
       const y1 = e.direction === "in" ? sPos.y : tPos.y;
-      const x2 = e.direction === "in" ? tPos.x - 88 : sPos.x - 88;
+      const x2 = e.direction === "in" ? tPos.x - 86 : sPos.x - 84;
       const y2 = e.direction === "in" ? tPos.y : sPos.y;
-      const dx = Math.abs(x2 - x1) * 0.45;
+      const dx = Math.max(36, Math.abs(x2 - x1) * 0.45);
       const inConflict = e.role === "uses" && conflicts.some(
         (c) => c.transformation_a_id === e.transformation_id || c.transformation_b_id === e.transformation_id
       );
@@ -1073,7 +1452,7 @@ _HTML_SCRIPT = r"""
     }
 
     // Draw Transformations
-    for (const tx of txs) {
+    for (const tx of visibleTxs) {
       const p = pos.get(`tx:${tx.id}`);
       if (!p) continue;
       const st = resolveTxStatus(tx, snap);
@@ -1081,17 +1460,24 @@ _HTML_SCRIPT = r"""
       const isSelected = selectedItem && selectedItem.kind === "tx" && selectedItem.id === tx.id;
       const dash = tx.modality === "planned" ? 'stroke-dasharray="6 3"' : (tx.modality === "template" ? 'stroke-dasharray="2 3"' : "");
       const bw = isSelected ? 3 : 1.8;
+      const nestedCount = tx.modality === "planned" ? (childCounts[tx.id] || 0) : 0;
       parts.push(`<g class="node-g" data-kind="tx" data-id="${esc(tx.id)}">`);
       parts.push(`<rect class="node-card" x="${p.x - 86}" y="${p.y - 26}" width="172" height="52" rx="9" fill="${pal.fill}" stroke="${pal.stroke}" stroke-width="${bw}" ${dash}/>`);
       const nameShort = tx.name.length > 25 ? tx.name.slice(0, 24) + "…" : tx.name;
       parts.push(`<text x="${p.x}" y="${p.y - 5}" text-anchor="middle" font-size="11" font-weight="700" fill="${pal.text}">${esc(nameShort)}</text>`);
       const sub = `${tx.modality} · ${tx.driver}` + (tx.duration_seconds !== null && tx.duration_seconds !== undefined ? ` · ${fmtDuration(tx.duration_seconds)}` : "");
       parts.push(`<text x="${p.x}" y="${p.y + 13}" text-anchor="middle" font-size="9.5" fill="#475569">${esc(sub)}</text>`);
+      if (nestedCount > 0) {
+        parts.push(`<g class="zoom-chip" data-toggle-parent="${esc(tx.id)}">`);
+        parts.push(`<rect x="${p.x - 52}" y="${p.y - 36}" width="104" height="16" rx="8" fill="#7c3aed"/>`);
+        parts.push(`<text x="${p.x}" y="${p.y - 25}" text-anchor="middle" font-size="9" font-weight="700" fill="#ffffff">▶ +${nestedCount} Unterschritte</text>`);
+        parts.push(`</g>`);
+      }
       parts.push(`</g>`);
     }
 
     // Draw States
-    for (const s of states) {
+    for (const s of visibleStates) {
       const p = pos.get(`state:${s.id}`);
       if (!p) continue;
       const st = resolveStateStatus(s, snap, txMap);
@@ -1307,6 +1693,21 @@ _HTML_SCRIPT = r"""
       </div>
     ` : "";
 
+    const childCounts = getChildCountByParent(snap);
+    const compositeParents = (snap.transformations || []).filter(
+      (t) => t.modality === "planned" && childCounts[t.id] > 0
+    );
+    const zoomHtml = compositeParents.length > 0 ? `
+      <div class="zoom-bar">
+        <span style="font-size:0.78rem;color:#475569;font-weight:600;">Verschachtelte Schritte (Zoom):</span>
+        ${compositeParents.map((p) => {
+          const isOpen = expandedParentIds.has(p.id);
+          const count = childCounts[p.id];
+          return `<button class="zoom-btn ${isOpen ? "expanded" : ""}" data-toggle-parent="${esc(p.id)}">${isOpen ? "▼" : "▶"} ${esc(p.name)} (${isOpen ? "einklappen" : "+" + count + " Unterschritte"})</button>`;
+        }).join("")}
+      </div>
+    ` : "";
+
     root.innerHTML = `
       <div class="shell">
         <div class="header">
@@ -1342,6 +1743,7 @@ _HTML_SCRIPT = r"""
                 <span>Zukunftsgraph (v2: Linienstil = Modalität, Farbe = Status)</span>
                 <span class="mono" style="font-weight:500;color:#475569;">${snap.states.length} Zustände · ${snap.transformations.length} Transformationen · ${snap.edges.length} Kanten</span>
               </h2>
+              ${zoomHtml}
               <div class="svg-wrap">${renderGraphSvg(snap)}</div>
               <div class="legend">
                 <span class="legend-item"><span class="swatch" style="border:2px solid #2563eb;background:#eff6ff;"></span>observed / happened (durchgezogen)</span>
@@ -1389,6 +1791,20 @@ _HTML_SCRIPT = r"""
         activeScenarioId = btn.getAttribute("data-scenario");
         activePhaseIdx = 0;
         selectedItem = null;
+        expandedParentIds.clear();
+        render();
+      });
+    });
+
+    root.querySelectorAll("[data-toggle-parent]").forEach((btn) => {
+      btn.addEventListener("click", (evt) => {
+        evt.stopPropagation();
+        const pid = btn.getAttribute("data-toggle-parent");
+        if (expandedParentIds.has(pid)) {
+          expandedParentIds.delete(pid);
+        } else {
+          expandedParentIds.add(pid);
+        }
         render();
       });
     });

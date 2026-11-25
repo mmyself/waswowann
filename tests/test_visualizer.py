@@ -20,6 +20,7 @@ def test_build_demo_scenarios_payload_real_engine_metrics() -> None:
         "roboter_wasser",
         "igel_stachelbart",
         "substrat_rezept",
+        "pilz_lebenszyklus",
     ]
     scenarios = payload["scenarios"]
 
@@ -132,6 +133,16 @@ def test_build_demo_scenarios_payload_real_engine_metrics() -> None:
     assert sub[2]["goal_evaluations"][0]["stage"] == 2
     assert sub[2]["goal_evaluations"][0]["status"] == "on_track"
 
+    # 6. Pilz-Lebenszyklus multi-step chain + nested composite zoom + cascade
+    cyc = scenarios["pilz_lebenszyklus"]["phases"]
+    assert len(cyc) == 4
+    assert [p["goal_evaluations"][0]["stage"] for p in cyc] == [2, 3, 4, 2]
+    cyc0_planned = [t for t in cyc[0]["transformations"] if t["modality"] == "planned"]
+    cyc0_children = [t for t in cyc0_planned if t["parent_id"] is not None]
+    assert len(cyc0_children) == 3
+    cyc0_internal = [s for s in cyc[0]["states"] if s["meta"].get("internal_to_parent_tx_id")]
+    assert len(cyc0_internal) == 2
+
 
 def test_render_html_valid_and_js_syntax_passes_node_check(tmp_path: Path) -> None:
     payload = build_demo_scenarios_payload()
@@ -145,6 +156,8 @@ def test_render_html_valid_and_js_syntax_passes_node_check(tmp_path: Path) -> No
     assert "Riesenschirmling" in html
     assert "Greifer 1" in html
     assert "Substrat-Rezept" in html
+    assert "Pilz-Lebenszyklus" in html
+    assert "Unterschritte" in html
 
     scripts = re.findall(r"<script>([\s\S]*?)</script>", html)
     assert len(scripts) == 1
