@@ -161,6 +161,7 @@ def create_server(config: Settings | None = None) -> FastMCP:
             "transformations": list(txs.values()),
             "edges": edges,
             "goal_evaluations": goal_evals,
+            "periodicity": engine.analyze_worldline_periods(entity_id=ent.id).model_dump(),
         }
 
     @mcp.tool()

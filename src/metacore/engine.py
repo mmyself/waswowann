@@ -10,6 +10,12 @@ from typing import Any, Literal
 
 from pydantic import Field
 
+from metacore.clocks import (
+    PeriodicityReport,
+    TimeSample,
+    analyze_periodicity,
+    evaluate_phase_condition,
+)
 from metacore.db import now_ms
 from metacore.math_fusion import (
     GaussianValue,
@@ -415,10 +421,21 @@ class MetaCoreEngine:
 
         guards: list[dict[str, Any]] = list(tx.formula.get("guards", []))
         guard_logic = str(tx.formula.get("guard_logic", "AND"))
+        out_states: list[State] = []
+        for oe in self.repo.list_edges(transformation_id=tx.id, direction="out"):
+            ost = self.repo.get_state(oe.state_id)
+            if ost is not None and ost.time_ms is not None:
+                out_states.append(ost)
+        tx_ref_ms: int | None = None
+        if out_states:
+            tx_ref_ms = max(ost.time_ms for ost in out_states if ost.time_ms is not None)
+        elif isinstance(tx.meta.get("scheduled_start_ms"), (int, float)):
+            tx_ref_ms = int(tx.meta["scheduled_start_ms"])
         p_pre *= self._evaluate_condition_group(
             guards,
             logic=guard_logic,
-            in_states=in_states,
+            in_states=[*in_states, *out_states],
+            ref_time_ms=tx_ref_ms,
         )
 
         # Evaluate nested child transformations belonging to this composite step
@@ -579,6 +596,28 @@ class MetaCoreEngine:
         if cond.get("kind") == "ratio":
             return self._evaluate_ratio_condition(
                 cond, in_states=in_states, default_entity_id=default_entity_id
+            )
+        if cond.get("kind") == "period_phase":
+            use_time = ref_time_ms
+            use_sigma: float | None = None
+            use_lat = cond.get("lat")
+            use_lon = cond.get("lon")
+            for st in reversed(in_states):
+                if use_time is None and st.time_ms is not None:
+                    use_time = st.time_ms
+                if use_sigma is None and st.time_ms == use_time and st.sigma_seconds is not None:
+                    use_sigma = st.sigma_seconds
+                if (use_lat is None or use_lon is None) and st.lat is not None and st.lon is not None:
+                    use_lat = st.lat
+                    use_lon = st.lon
+            if use_time is None:
+                use_time = now_ms()
+            return evaluate_phase_condition(
+                cond,
+                time_ms=use_time,
+                sigma_seconds=use_sigma,
+                lat=float(use_lat) if use_lat is not None else None,
+                lon=float(use_lon) if use_lon is not None else None,
             )
 
         candidates = self._resolve_observed_candidates(
@@ -2075,4 +2114,65 @@ class MetaCoreEngine:
             uses_conflicts=self.detect_uses_conflicts(),
             open_ai_prior_state_ids=open_priors,
             summary=summary,
+        )
+
+    # ------------------------------------------------------------------
+    # Multi-clock periodicity & interval analysis
+    # ------------------------------------------------------------------
+
+    def analyze_worldline_periods(
+        self,
+        *,
+        entity_id: str | None = None,
+        category: str | None = None,
+        property_name: str | None = None,
+        tz_name: str = "Europe/Berlin",
+        now_ms_override: int | None = None,
+        tidal_offset_hours: float = 0.0,
+    ) -> PeriodicityReport:
+        """Analyze observed timestamps across all periodic clocks and endogenous intervals."""
+        allowed_ent_ids: set[str] | None = None
+        if category is not None:
+            allowed_ent_ids = {
+                e.id
+                for e in self.repo.list_entities(include_archived=False)
+                if e.category == category
+            }
+
+        states = self.repo.list_states(
+            entity_id=entity_id,
+            property_name=property_name,
+            modality="observed",
+        )
+        samples: list[TimeSample] = []
+        for st in states:
+            if st.time_ms is None:
+                continue
+            if allowed_ent_ids is not None and st.entity_id not in allowed_ent_ids:
+                continue
+            samples.append(
+                TimeSample(
+                    time_ms=st.time_ms,
+                    sigma_seconds=st.sigma_seconds,
+                    lat=st.lat,
+                    lon=st.lon,
+                )
+            )
+
+        ent_label = ""
+        if entity_id:
+            ent = self.repo.get_entity(entity_id)
+            ent_label = ent.name if ent else entity_id
+        elif category:
+            ent_label = f"Kategorie: {category}"
+        else:
+            ent_label = "Archiv"
+
+        return analyze_periodicity(
+            samples,
+            tz_name=tz_name,
+            now_ms=now_ms_override if now_ms_override is not None else now_ms(),
+            tidal_offset_hours=tidal_offset_hours,
+            entity_id=entity_id,
+            label=ent_label,
         )
