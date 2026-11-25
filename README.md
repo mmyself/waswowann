@@ -4,6 +4,7 @@
 
 **Vergangenheit beobachten. Zukunft ehrlich planen. Auf einer einzigen Weltlinie.**
 
+[![Version](https://img.shields.io/badge/Version-v0.0.1-7c3aed?style=flat-square)](VERSION)
 [![Prinzip](https://img.shields.io/badge/Leitidee-Was%20%C2%B7%20Wo%20%C2%B7%20Wann-2563eb?style=flat-square)](#warum-was--wo--wann-die-weltlinie-als-leitidee)
 [![Architektur](https://img.shields.io/badge/Local--First-SQLite%20%C2%B7%20Python%20%C2%B7%20Next.js-0f172a?style=flat-square)](#unter-der-haube--die-bausteine-im-detail)
 [![MetaCore](https://img.shields.io/badge/Engine-MetaCore%20%2B%20MCP-059669?style=flat-square)](metacore/README.md)
