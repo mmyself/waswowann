@@ -2,12 +2,13 @@
 
 import { FormEvent, useMemo, useState } from "react";
 import { api, ApiError } from "@/lib/api";
-import { computeCausalSteps, formatDurationDays, formatMetaDate, goalStatusLabel } from "@/lib/zukunftsgraph";
+import { computeCausalSteps, formatDurationDays, formatMetaDate, goalStatusLabel, periodStatusLabel } from "@/lib/zukunftsgraph";
 import type {
   EscalationAction,
   GoalEvaluation,
   MetaCoreState,
   MetaCoreTransformation,
+  PeriodicityReport,
   SeasonalItem,
   ZukunftsgraphSnapshot,
 } from "@/lib/types";
@@ -39,6 +40,9 @@ export default function ZukunftsgraphPanel({
   const [obsVal, setObsVal] = useState("18.5");
   const [obsSigma, setObsSigma] = useState("0.5");
   const [obsUnit, setObsUnit] = useState("°C");
+  const [periodPreset, setPeriodPreset] = useState<"archive" | "weekly" | "tidal" | "flush">("archive");
+  const [customPeriodReport, setCustomPeriodReport] = useState<PeriodicityReport | null>(null);
+  const [periodBusy, setPeriodBusy] = useState(false);
 
   const entityMap = useMemo(
     () => new Map((snapshot?.entities ?? []).map((e) => [e.id, e])),
@@ -179,8 +183,113 @@ export default function ZukunftsgraphPanel({
       : null;
 
   if (view === "season") {
+    const activePeriodReport = periodPreset === "archive" ? snapshot.periodicity ?? null : customPeriodReport;
+    const clocks = activePeriodReport?.current_clocks?.length
+      ? activePeriodReport.current_clocks
+      : snapshot.current_clocks ?? [];
+
+    const runPreset = async (preset: "archive" | "weekly" | "tidal" | "flush") => {
+      setPeriodPreset(preset);
+      if (preset === "archive") {
+        setCustomPeriodReport(null);
+        return;
+      }
+      setPeriodBusy(true);
+      setActionError("");
+      try {
+        const anchor = snapshot.now_ms;
+        let timestamps: number[] = [];
+        let label = "";
+        if (preset === "weekly") {
+          label = "Testreihe: Wochenend-Takt (5× Sa)";
+          const day = 86_400_000;
+          timestamps = [4, 3, 2, 1, 0].map((w) => anchor - w * 7 * day);
+        } else if (preset === "tidal") {
+          label = "Testreihe: Gezeiten / Ebbe (M2 12,42 h)";
+          const tideMs = Math.round(12.4206012 * 3600 * 1000);
+          timestamps = [4, 3, 2, 1, 0].map((k) => anchor - k * 3 * tideMs);
+        } else {
+          label = "Testreihe: Eigen-Intervall (~14 d Flushes)";
+          const day = 86_400_000;
+          timestamps = [anchor - 42 * day, anchor - 28 * day, anchor - 13 * day, anchor];
+        }
+        const rep = await api.analyzePeriods({ timestamps_ms: timestamps, label, now_ms: anchor });
+        setCustomPeriodReport(rep);
+      } catch (cause) {
+        setActionError(cause instanceof ApiError ? cause.message : "Periodenanalyse fehlgeschlagen.");
+      } finally {
+        setPeriodBusy(false);
+      }
+    };
+
     return (
-      <section className="zg-panel" aria-label="Jahresansicht nach Tag im Jahr">
+      <section className="zg-panel" aria-label="Perioden und Jahresansicht">
+        {clocks.length > 0 && (
+          <div className="clocks-section">
+            <div className="zg-section-title">
+              <h3>Aktuelle Uhren im JETZT</h3>
+              <span>{formatMetaDate(snapshot.now_ms, true)}</span>
+            </div>
+            <div className="clocks-strip">
+              {clocks.map((c) => (
+                <div key={c.clock_id} className="clock-chip">
+                  <small>{c.clock_name}</small>
+                  <strong>{c.label}</strong>
+                  <span>{c.detail} · Phase {Math.round(c.phase * 100)} %</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="period-detector">
+          <div className="zg-head">
+            <div>
+              <p className="eyebrow">Takt- &amp; Perioden-Erkennung</p>
+              <h2>Zu welcher Periode gehört die Reihe?</h2>
+            </div>
+            <div className="zg-actions">
+              <button type="button" className={periodPreset === "archive" ? "secondary-action is-active-pill" : "secondary-action"} disabled={periodBusy} onClick={() => runPreset("archive")}>Archiv-Funde</button>
+              <button type="button" className={periodPreset === "weekly" ? "secondary-action is-active-pill" : "secondary-action"} disabled={periodBusy} onClick={() => runPreset("weekly")}>Wochen-Takt</button>
+              <button type="button" className={periodPreset === "tidal" ? "secondary-action is-active-pill" : "secondary-action"} disabled={periodBusy} onClick={() => runPreset("tidal")}>Gezeiten (12,4 h)</button>
+              <button type="button" className={periodPreset === "flush" ? "secondary-action is-active-pill" : "secondary-action"} disabled={periodBusy} onClick={() => runPreset("flush")}>14-Tage-Zyklus</button>
+            </div>
+          </div>
+
+          {activePeriodReport && (
+            <>
+              <div className="zg-feedback" role="status">
+                <strong>{activePeriodReport.label || "Analyse"}:</strong> {activePeriodReport.summary} ({activePeriodReport.distinct_event_count} getrennte Ereignisse)
+              </div>
+              <div className="period-table">
+                {activePeriodReport.candidates.map((cand) => (
+                  <div key={cand.clock_id} className={`period-row is-${cand.status}`}>
+                    <div className="period-row__name">
+                      <strong>{cand.clock_name}</strong>
+                      <small>{cand.explanation}</small>
+                    </div>
+                    <span className={`zg-stage-pill is-period-${cand.status}`}>{periodStatusLabel(cand.status)}</span>
+                    <div className="period-bar-wrap">
+                      <div className="period-bar"><i style={{ width: `${Math.round(cand.concentration * 100)}%` }} /></div>
+                      <small>R={Math.round(cand.concentration * 100)} % · {cand.covered_cycles} Zyk.</small>
+                    </div>
+                    <div className="period-next">
+                      {cand.next_window_center_ms ? (
+                        <>
+                          <small>Nächstes Fenster</small>
+                          <strong>{formatMetaDate(cand.next_window_center_ms, true)}</strong>
+                        </>
+                      ) : (
+                        <small>{cand.mean_label || "—"}</small>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+
         <div className="zg-head">
           <div>
             <p className="eyebrow">Jahresansicht (Tag 1–366)</p>

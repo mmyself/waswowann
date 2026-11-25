@@ -7,7 +7,9 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+import app.config as config_module
 from app.services.metacore_bridge import (
+    analyze_custom_period_samples,
     build_live_snapshot,
     inspect_worldline,
     open_metacore,
@@ -55,6 +57,13 @@ class MetaGoalRequest(BaseModel):
 class EscalationResolveRequest(BaseModel):
     action: Literal["widen_tolerance", "switch_branch", "abort_goal"]
     params: dict[str, Any] = Field(default_factory=dict)
+
+
+class PeriodAnalyzeRequest(BaseModel):
+    timestamps_ms: list[int] = Field(default_factory=list, max_length=1000)
+    label: str = Field(default="Zeitreihe", max_length=200)
+    tidal_offset_hours: float = 0.0
+    now_ms: int | None = None
 
 
 @router.get("/snapshot")
@@ -179,3 +188,33 @@ def post_resolve_escalation(goal_id: str, payload: EscalationResolveRequest) -> 
         "feedback": fb.model_dump(),
         "snapshot": build_live_snapshot(auto_sync=False, last_feedback=fb),
     }
+
+
+@router.get("/periods")
+def get_periods(
+    entity_id: str | None = Query(default=None),
+    category: str | None = Query(default=None),
+    property_name: str | None = Query(default=None),
+    tidal_offset_hours: float = Query(default=0.0),
+) -> dict[str, Any]:
+    repo, engine = open_metacore()
+    resolved_id = resolve_entity_id(repo, entity_id) if entity_id else None
+    if entity_id and resolved_id is None:
+        raise _error(404, "ENTITY_NOT_FOUND", f"Unbekannte Weltlinie: {entity_id}")
+    return engine.analyze_worldline_periods(
+        entity_id=resolved_id,
+        category=category,
+        property_name=property_name,
+        tz_name=config_module.settings.import_timezone,
+        tidal_offset_hours=tidal_offset_hours,
+    ).model_dump()
+
+
+@router.post("/periods/analyze")
+def post_analyze_periods(payload: PeriodAnalyzeRequest) -> dict[str, Any]:
+    return analyze_custom_period_samples(
+        payload.timestamps_ms,
+        label=payload.label,
+        tidal_offset_hours=payload.tidal_offset_hours,
+        now_ms_override=payload.now_ms,
+    )

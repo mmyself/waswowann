@@ -185,3 +185,48 @@ def test_worldline_observation_goal_and_escalations(client: TestClient, config):
 
     missing = client.get("/api/zukunftsgraph/worldlines/does-not-exist")
     assert missing.status_code == 404
+
+
+def test_clocks_and_periodicity_endpoints(client: TestClient, config):
+    _insert_obs_with_photos(
+        config,
+        obs_id="obs-sat-check",
+        title="Samstagsrunde",
+        environment="outdoor",
+        photos=[
+            {"id": "m-sat-1", "lat": 53.55, "lon": 9.99, "sigma_meters": 8.0, "time_ms": 1_793_520_000_000},
+        ],
+    )
+    snap = client.get("/api/zukunftsgraph/snapshot").json()
+    assert len(snap["current_clocks"]) == 7
+    assert "periodicity" in snap
+
+    wl_periods = client.get("/api/zukunftsgraph/periods", params={"entity_id": "obs-sat-check"})
+    assert wl_periods.status_code == 200
+    assert wl_periods.json()["sample_count"] >= 1
+
+    # Weekly series (5 Saturdays)
+    sat0 = 1_791_442_800_000  # 2026-10-10T09:00 Europe/Berlin approx
+    weekly_ts = [sat0 + i * 7 * 86_400_000 for i in range(5)]
+    res_week = client.post(
+        "/api/zukunftsgraph/periods/analyze",
+        headers=HEADERS,
+        json={"timestamps_ms": weekly_ts, "label": "Samstags-Takt"},
+    )
+    assert res_week.status_code == 200
+    body_week = res_week.json()
+    cands_week = {c["clock_id"]: c for c in body_week["candidates"]}
+    assert cands_week["week_local"]["status"] == "detected"
+    assert cands_week["relative_interval"]["status"] == "detected"
+
+    # Tidal series (~12.4206012h * 3 apart)
+    tide_ms = round(12.4206012 * 3600 * 1000)
+    tidal_ts = [sat0 + i * 3 * tide_ms for i in range(5)]
+    res_tide = client.post(
+        "/api/zukunftsgraph/periods/analyze",
+        headers=HEADERS,
+        json={"timestamps_ms": tidal_ts, "label": "Gezeiten-Serie"},
+    )
+    assert res_tide.status_code == 200
+    cands = {c["clock_id"]: c for c in res_tide.json()["candidates"]}
+    assert cands["tidal_semidiurnal"]["status"] == "detected"

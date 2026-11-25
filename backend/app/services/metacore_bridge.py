@@ -17,6 +17,7 @@ _METACORE_SRC = config_module.PROJECT_DIR / "metacore" / "src"
 if str(_METACORE_SRC) not in sys.path:
     sys.path.insert(0, str(_METACORE_SRC))
 
+from metacore.clocks import TimeSample, analyze_periodicity, get_current_clock_phases  # noqa: E402
 from metacore.config import Settings as MetaCoreSettings  # noqa: E402
 from metacore.db import db as mc_db, migrate as mc_migrate, now_ms as mc_now_ms  # noqa: E402
 from metacore.engine import MetaCoreEngine, MutationFeedback  # noqa: E402
@@ -392,6 +393,12 @@ def _seed_outdoor_habitat_plan(
                         "category": "umgebung",
                         "conditions": [
                             {
+                                "kind": "period_phase",
+                                "clock": "year_solar",
+                                "day_of_year_min": 240,
+                                "day_of_year_max": 360,
+                            },
+                            {
                                 "entity_id": weather.id,
                                 "property_name": "rain_mm",
                                 "aggregation": "sum",
@@ -475,6 +482,12 @@ def _seed_outdoor_habitat_plan(
             success_prob=0.90,
             formula={
                 "guards": [
+                    {
+                        "kind": "period_phase",
+                        "clock": "year_solar",
+                        "day_of_year_min": 240,
+                        "day_of_year_max": 360,
+                    },
                     {
                         "entity_id": weather.id,
                         "property_name": "temperature_c",
@@ -1085,10 +1098,29 @@ def build_live_snapshot(
             )
 
     synced_count = sum(1 for e in snap["entities"] if (e.get("meta") or {}).get("legacy_obs_id"))
-    snap["now_ms"] = max(mc_now_ms(), latest_obs_ms)
+    ref_now = max(mc_now_ms(), latest_obs_ms)
+    # Derive map/clock reference coordinates from spatial observations if present
+    coord_pairs = [
+        (float(s["lat"]), float(s["lon"]))
+        for s in snap["states"]
+        if _is_valid_lat_lon(s.get("lat"), s.get("lon"))
+    ]
+    ref_lat = sum(p[0] for p in coord_pairs) / len(coord_pairs) if coord_pairs else 53.55
+    ref_lon = sum(p[1] for p in coord_pairs) / len(coord_pairs) if coord_pairs else 9.99
+
+    snap["now_ms"] = ref_now
     snap["synced_observation_count"] = synced_count
     snap["spatial_predictions"] = spatial_predictions
     snap["seasonal_series"] = sorted(seasonal_series, key=lambda item: (item["day_of_year"], item["year"]))
+    snap["current_clocks"] = [
+        c.model_dump()
+        for c in get_current_clock_phases(ref_now, tz_name=tz_name, lat=ref_lat, lon=ref_lon)
+    ]
+    snap["periodicity"] = engine.analyze_worldline_periods(
+        property_name="presence",
+        tz_name=tz_name,
+        now_ms_override=ref_now,
+    ).model_dump()
     return snap
 
 
@@ -1151,4 +1183,28 @@ def inspect_worldline(item_id: str) -> dict[str, Any]:
         "transformations": [t.model_dump() for t in tx_map.values()],
         "edges": list(edges_seen.values()),
         "goal_evaluations": goal_evals,
+        "periodicity": engine.analyze_worldline_periods(
+            entity_id=ent.id,
+            tz_name=config_module.settings.import_timezone,
+        ).model_dump(),
     }
+
+
+def analyze_custom_period_samples(
+    timestamps_ms: list[int],
+    *,
+    label: str = "Benutzerdefinierte Reihe",
+    tidal_offset_hours: float = 0.0,
+    now_ms_override: int | None = None,
+) -> dict[str, Any]:
+    """Analyze an arbitrary timestamp sequence across all clocks and intervals."""
+    samples = [TimeSample(time_ms=int(ts)) for ts in timestamps_ms]
+    tz_name = config_module.settings.import_timezone
+    ref_now = now_ms_override if now_ms_override is not None else (max(timestamps_ms) if timestamps_ms else mc_now_ms())
+    return analyze_periodicity(
+        samples,
+        tz_name=tz_name,
+        now_ms=ref_now,
+        tidal_offset_hours=tidal_offset_hours,
+        label=label,
+    ).model_dump()

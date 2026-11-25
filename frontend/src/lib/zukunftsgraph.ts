@@ -1,6 +1,6 @@
 import { DateTime } from "luxon";
 import { DISPLAY_TIMEZONE } from "./time-filter";
-import type { GoalStatus, MetaCoreEdge, MetaCoreState, MetaCoreTransformation } from "./types";
+import type { GoalStatus, MetaCoreEdge, MetaCoreState, MetaCoreTransformation, PeriodStatus } from "./types";
 
 export interface TransformationHierarchy {
   roots: MetaCoreTransformation[];
@@ -128,5 +128,18 @@ export function goalStatusLabel(status: GoalStatus | null | undefined): string {
       return "Abgebrochen";
     default:
       return "Prognose";
+  }
+}
+
+export function periodStatusLabel(status: PeriodStatus): string {
+  switch (status) {
+    case "detected":
+      return "Erkannt";
+    case "weak":
+      return "Schwach";
+    case "none":
+      return "Kein Takt";
+    default:
+      return "Zu wenig Zyklen";
   }
 }

@@ -359,6 +359,8 @@ export interface ZukunftsgraphSnapshot {
   spatial_predictions: SpatialPrediction[];
   seasonal_series: SeasonalItem[];
   last_feedback: MutationFeedback | null;
+  current_clocks?: ClockPhaseSnapshot[];
+  periodicity?: PeriodicityReport;
 }
 
 export interface WorldlineInspection {
@@ -370,4 +372,63 @@ export interface WorldlineInspection {
   transformations: MetaCoreTransformation[];
   edges: MetaCoreEdge[];
   goal_evaluations: GoalEvaluation[];
+  periodicity?: PeriodicityReport;
+}
+
+export type ClockId =
+  | "day_local"
+  | "solar_day"
+  | "week_local"
+  | "month_calendar"
+  | "lunar_synodic"
+  | "tidal_semidiurnal"
+  | "year_solar"
+  | "relative_interval";
+
+export type PeriodStatus = "detected" | "weak" | "none" | "insufficient_data";
+
+export interface ClockPhaseSnapshot {
+  clock_id: ClockId;
+  clock_name: string;
+  phase: number;
+  cycle_index: number;
+  period_seconds: number;
+  label: string;
+  detail: string;
+  solar_elevation_deg?: number | null;
+  is_daylight?: boolean | null;
+  lunar_illumination?: number | null;
+  is_spring_tide?: boolean | null;
+}
+
+export interface PeriodCandidate {
+  clock_id: ClockId;
+  clock_name: string;
+  status: PeriodStatus;
+  period_seconds: number;
+  sample_count: number;
+  covered_cycles: number;
+  concentration: number;
+  p_value?: number | null;
+  mean_phase?: number | null;
+  sigma_phase?: number | null;
+  mean_interval_seconds?: number | null;
+  sigma_interval_seconds?: number | null;
+  mean_label: string;
+  next_window_start_ms?: number | null;
+  next_window_center_ms?: number | null;
+  next_window_end_ms?: number | null;
+  explanation: string;
+}
+
+export interface PeriodicityReport {
+  entity_id?: string | null;
+  label: string;
+  now_ms: number;
+  sample_count: number;
+  distinct_event_count: number;
+  current_clocks: ClockPhaseSnapshot[];
+  candidates: PeriodCandidate[];
+  best_clock_id?: ClockId | null;
+  summary: string;
 }

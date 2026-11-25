@@ -292,6 +292,12 @@ function DetailContent({ detail, onSave, onMeasurementsChanged, pickedDraftLocat
             ))}
           </div>
         )}
+        {worldline.periodicity?.best_clock_id && (
+          <div className="worldline-period-badge">
+            <span>Erkannte Periode</span>
+            <strong>{worldline.periodicity.summary}</strong>
+          </div>
+        )}
         <div className="worldline-actions">
           {onOpenGraph && <button type="button" className="secondary-action" onClick={() => onOpenGraph(worldline.entity.id)}>Im Zukunftsgraphen öffnen ↗</button>}
           <button type="button" className="text-action" onClick={() => setShowGoalForm((v) => !v)}>{showGoalForm ? "Abbrechen" : "+ Neues Ziel setzen"}</button>

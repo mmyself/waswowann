@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { predictedPointFeatures, predictedUncertaintyFeatures } from "../src/lib/contours";
 import { mergeFutureExtent } from "../src/lib/time-filter";
-import { buildTransformationHierarchy, computeCausalSteps } from "../src/lib/zukunftsgraph";
+import { buildTransformationHierarchy, computeCausalSteps, periodStatusLabel } from "../src/lib/zukunftsgraph";
 import type { MetaCoreEdge, MetaCoreState, MetaCoreTransformation, SpatialPrediction } from "../src/lib/types";
 
 describe("MetaCore frontend helpers", () => {
@@ -172,5 +172,7 @@ describe("MetaCore frontend helpers", () => {
 
     const causal = computeCausalSteps(txs, states, edges);
     expect(causal.orderedRoots.map((r) => r.id)).toEqual(["tx-parent", "tx-downstream"]);
+    expect(periodStatusLabel("detected")).toBe("Erkannt");
+    expect(periodStatusLabel("insufficient_data")).toBe("Zu wenig Zyklen");
   });
 });

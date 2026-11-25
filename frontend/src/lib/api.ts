@@ -9,6 +9,7 @@ import type {
   MutationFeedback,
   ObservationDetail,
   ObservationListResponse,
+  PeriodicityReport,
   PublicConfig,
   WorldlineInspection,
   ZukunftsgraphSnapshot,
@@ -163,4 +164,18 @@ export const api = {
       `/api/zukunftsgraph/escalations/${encodeURIComponent(goalId)}/resolve`,
       { method: "POST", body: JSON.stringify({ action, params }) }
     ),
+  periods: (params?: { entity_id?: string; category?: string; property_name?: string; tidal_offset_hours?: number }, signal?: AbortSignal) => {
+    const qs = new URLSearchParams();
+    if (params?.entity_id) qs.set("entity_id", params.entity_id);
+    if (params?.category) qs.set("category", params.category);
+    if (params?.property_name) qs.set("property_name", params.property_name);
+    if (params?.tidal_offset_hours !== undefined) qs.set("tidal_offset_hours", String(params.tidal_offset_hours));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return request<PeriodicityReport>(`/api/zukunftsgraph/periods${suffix}`, { signal });
+  },
+  analyzePeriods: (payload: { timestamps_ms: number[]; label?: string; tidal_offset_hours?: number; now_ms?: number }) =>
+    request<PeriodicityReport>("/api/zukunftsgraph/periods/analyze", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 };
