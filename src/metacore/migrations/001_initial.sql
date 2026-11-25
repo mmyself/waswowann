@@ -1,4 +1,4 @@
--- WoWannWas MetaCore initial schema (v2 principles)
+-- WasWoWann MetaCore initial schema (v2 principles)
 -- 4 core tables: entities, states, transformations, edges
 
 CREATE TABLE entities (

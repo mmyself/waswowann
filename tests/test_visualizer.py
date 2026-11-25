@@ -149,7 +149,7 @@ def test_render_html_valid_and_js_syntax_passes_node_check(tmp_path: Path) -> No
     html = render_html(payload)
 
     assert html.startswith("<!DOCTYPE html>")
-    assert "WoWannWas" in html
+    assert "WasWoWann" in html
     assert "Zukunftsgraph" in html
     assert "MetaCore" in html
     assert "Igel-Stachelbart" in html

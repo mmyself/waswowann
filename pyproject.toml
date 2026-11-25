@@ -3,9 +3,9 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wowannwas-metacore"
+name = "waswowann-metacore"
 version = "0.1.0"
-description = "Deterministischer Raum-Zeit-MetaCore und semantischer MCP-Server für WoWannWas"
+description = "Deterministischer Raum-Zeit-MetaCore und semantischer MCP-Server für WasWoWann"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -20,7 +20,7 @@ dev = [
 ]
 
 [project.scripts]
-wowannwas-mcp = "metacore.mcp_server:main"
+waswowann-mcp = "metacore.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

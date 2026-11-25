@@ -66,9 +66,9 @@ def create_server(config: Settings | None = None) -> FastMCP:
     engine = MetaCoreEngine(repo)
 
     mcp = FastMCP(
-        name="wowannwas-metacore",
+        name="waswowann-metacore",
         instructions=(
-            "Semantischer Zugriff auf das WoWannWas-Weltmodell (Weltlinien, Eigenschafts-Zustände, "
+            "Semantischer Zugriff auf das WasWoWann-Weltmodell (Weltlinien, Eigenschafts-Zustände, "
             "Transformationen, Vorlagen und 4-stufige Ziel-Eskalation)."
         ),
     )

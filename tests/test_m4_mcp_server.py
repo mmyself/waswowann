@@ -41,7 +41,7 @@ def test_mcp_server_registers_all_8_tools_and_entrypoint_exists(settings: Settin
         "set_goal",
         "resolve_escalation",
     }
-    script_path = Path(sys.executable).parent / "wowannwas-mcp"
+    script_path = Path(sys.executable).parent / "waswowann-mcp"
     assert script_path.exists()
 
 

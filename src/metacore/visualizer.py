@@ -465,16 +465,16 @@ def _run_igel_stachelbart_scenario() -> dict[str, Any]:
             engine,
             title="Tag 8,92: Ernte 265 g (Kalibrierung)",
             subtitle=(
-                "Realer WoWannWas-Zeitstempel (8,92 d) kalibriert das Fruchtungs-Template auf 'measured'."
+                "Realer WasWoWann-Zeitstempel (8,92 d) kalibriert das Fruchtungs-Template auf 'measured'."
             ),
             last_feedback=fb_harvest,
         )
 
     return {
         "id": "igel_stachelbart",
-        "title": "4. Igel-Stachelbart (Reale WoWannWas-Daten)",
+        "title": "4. Igel-Stachelbart (Reale WasWoWann-Daten)",
         "description": (
-            "Reale Timelapse-Spanne aus WoWannWas plus Klima-Tracking der Indoor Fruchtungsbox "
+            "Reale Timelapse-Spanne aus WasWoWann plus Klima-Tracking der Indoor Fruchtungsbox "
             "(16 °C → 18 °C, 80 ± 10 % rF), Handy_Indoor-Deduplizierung (σ = 12 m) und "
             "automatische Dauer-Kalibrierung nach 8,92 Tagen."
         ),
@@ -661,10 +661,10 @@ def build_demo_scenarios_payload() -> dict[str, Any]:
     substrat_rezept = _run_substrat_rezept_scenario()
     pilz_lebenszyklus = _run_pilz_lebenszyklus_scenario()
     return {
-        "title": "WoWannWas · Zukunftsgraph (Live MetaCore-Engine)",
+        "title": "WasWoWann · Zukunftsgraph (Live MetaCore-Engine)",
         "generated_by": "metacore.visualizer",
         "system_names": {
-            "system": "WoWannWas",
+            "system": "WasWoWann",
             "view": "Zukunftsgraph",
             "engine": "MetaCore",
         },
@@ -1714,7 +1714,7 @@ _HTML_SCRIPT = r"""
           <div>
             <h1>${esc(PAYLOAD.title)}</h1>
             <p class="header-sub">
-              Begriffe: <strong>WoWannWas</strong> (Gesamtsystem) · <strong>Zukunftsgraph</strong> (Zukunftssicht) · <strong>MetaCore</strong> (SQLite/Python-Engine) — Live-Snapshot ohne statische Demo-Werte.
+              Begriffe: <strong>WasWoWann</strong> (Gesamtsystem) · <strong>Zukunftsgraph</strong> (Zukunftssicht) · <strong>MetaCore</strong> (SQLite/Python-Engine) — Live-Snapshot ohne statische Demo-Werte.
             </p>
           </div>
           <div class="pill-row">${scenarioPills}</div>
@@ -1869,7 +1869,7 @@ def _serialize_payload_for_js(payload: dict[str, Any]) -> str:
 def render_html(payload: dict[str, Any]) -> str:
     """Render a standalone interactive Zukunftsgraph HTML page from an engine payload."""
     safe_json = _serialize_payload_for_js(payload)
-    page_title = escape(str(payload.get("title", "WoWannWas · Zukunftsgraph")))
+    page_title = escape(str(payload.get("title", "WasWoWann · Zukunftsgraph")))
     return (
         "<!DOCTYPE html>\n"
         '<html lang="de">\n'

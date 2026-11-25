@@ -1,10 +1,10 @@
-# WoWannWas MetaCore – Umsetzungsplan (Phase 1)
+# WasWoWann MetaCore – Umsetzungsplan (Phase 1)
 
 Stand: 2026-11-24
 
 ## 1. Zielbild & Abgrenzung (Phase 1 vs. Phase 2)
 
-Dieses Repository (`/Users/jan/WoWannWas/metacore`) setzt den **neuro-symbolischen Kern** von WoWannWas als eigenständiges Python-Projekt um: Ein **programmierter, deterministischer MetaCore** übernimmt Rechnen, Graph-Konsistenz, Gauß-Fusion, Weltlinien-Spaltung/Verschmelzung und 4-stufige Eskalation, während **LLMs und Agenten** über einen **semantischen MCP-Server** natürlichsprachliche Eingaben übersetzen, `ai_prior`-Schätzwerte liefern und den Zukunftsgraphen pflegen.
+Dieses Repository (`/Users/jan/WasWoWann/metacore`) setzt den **neuro-symbolischen Kern** von WasWoWann als eigenständiges Python-Projekt um: Ein **programmierter, deterministischer MetaCore** übernimmt Rechnen, Graph-Konsistenz, Gauß-Fusion, Weltlinien-Spaltung/Verschmelzung und 4-stufige Eskalation, während **LLMs und Agenten** über einen **semantischen MCP-Server** natürlichsprachliche Eingaben übersetzen, `ai_prior`-Schätzwerte liefern und den Zukunftsgraphen pflegen.
 
 * **Phase 1 (Umfang dieses Plans):**
   * Eigenständige SQLite-Datenbank mit Migration `001_initial.sql` (4 Kerntabellen + Indizes).
@@ -14,8 +14,8 @@ Dieses Repository (`/Users/jan/WoWannWas/metacore`) setzt den **neuro-symbolisch
   * Semantischer MCP-Server (`mcp_server.py`) mit 8 Werkzeugen und direktem Folgen-Feedback.
   * Referenz-Seeds und durchgängige Tests für die drei Leitbeispiele (*Körnerbrut 400 g*, *Riesenschirmling Folgejahr*, *Roboter R1*).
 * **Phase 2 (bewusst ausgeklammert, folgt separat):**
-  * HTTP-/FastAPI-Anbindung an das bestehende Backend (`/Users/jan/WoWannWas/backend`).
-  * Visuelle Integration (Karte, Zeitstrahl, Zukunftsgraph, Kausal-Linse) in das Next.js-Frontend (`/Users/jan/WoWannWas/frontend`).
+  * HTTP-/FastAPI-Anbindung an das bestehende Backend (`/Users/jan/WasWoWann/backend`).
+  * Visuelle Integration (Karte, Zeitstrahl, Zukunftsgraph, Kausal-Linse) in das Next.js-Frontend (`/Users/jan/WasWoWann/frontend`).
   * Brücke zwischen bestehenden `observations`/`media`-Tabellen und MetaCore-Weltlinien.
 
 ---
@@ -135,7 +135,7 @@ Alle Berechnungen arbeiten rein deterministisch in Python (`math`, ohne komplexe
    Für unabhängige Messungen $(\mu_i, \sigma_i)$ mit Präzision $w_i = 1 / \sigma_i^2$:
    $$\mu_f = \frac{\sum w_i \mu_i}{\sum w_i}, \qquad \sigma_f = \sqrt{\frac{1}{\sum w_i}}$$
 2. **2D-Ortsfusion / Habitat-Generalisierung:**
-   * *Konvergenz (dasselbe Objekt mehrfach gemessen):* Übernahme der lokalen metrischen ENU-Transformation aus WoWannWas (`gaussian_fusion.py`-Mathematik) zur präzisionsgewichteten Fusion.
+   * *Konvergenz (dasselbe Objekt mehrfach gemessen):* Übernahme der lokalen metrischen ENU-Transformation aus WasWoWann (`gaussian_fusion.py`-Mathematik) zur präzisionsgewichteten Fusion.
    * *Streuung (z. B. 2 Schirmling-Funde im Abstand ~180 m → Suchgebiet):* Berechnung des Schwerpunkts plus kombinierter Gebietsstreuung $\sigma_{\text{Gebiet}} = \sqrt{\sigma_{\text{sample}}^2 + \bar{\sigma}_{\text{obs}}^2}$ mit konservativem Mindest-$\sigma$ bei $n < 5$ Funden.
 3. **Analytische Fehlerfortpflanzung für Mengenformeln:**
    * Produkt $Z = A \cdot B$ (z. B. `400 g × (1,75 ± 0,10)`):
@@ -191,10 +191,10 @@ Der Server läuft lokal über `stdio` (`mcp.server.fastmcp` bzw. `Server` aus de
 ```json
 {
   "mcpServers": {
-    "wowannwas-metacore": {
-      "command": "/Users/jan/WoWannWas/metacore/.venv/bin/wowannwas-mcp",
+    "waswowann-metacore": {
+      "command": "/Users/jan/WasWoWann/metacore/.venv/bin/waswowann-mcp",
       "env": {
-        "METACORE_DB_PATH": "/Users/jan/WoWannWas/data/metacore.sqlite3"
+        "METACORE_DB_PATH": "/Users/jan/WasWoWann/data/metacore.sqlite3"
       }
     }
   }
@@ -219,7 +219,7 @@ Der Server läuft lokal über `stdio` (`mcp.server.fastmcp` bzw. `Server` aus de
 
 ### M4 – Semantischer MCP-Server & Folgen-Feedback
 * **Inhalt:** `mcp_server.py`, `tests/test_mcp_server.py`.
-* **Abnahme:** Alle 8 MCP-Tools sind über das offizielle MCP-SDK aufrufbar, validieren per Pydantic, liefern konsistentes Folgen-Feedback (inkl. Stufe & gebrochener Dimensionen) und starten sauber über `wowannwas-mcp`.
+* **Abnahme:** Alle 8 MCP-Tools sind über das offizielle MCP-SDK aufrufbar, validieren per Pydantic, liefern konsistentes Folgen-Feedback (inkl. Stufe & gebrochener Dimensionen) und starten sauber über `waswowann-mcp`.
 
 ### M5 – Drei Referenz-Szenarien (Seeds & End-to-End-Tests)
 * **Inhalt:** `seeds/{koernerbrut,riesenschirmling,roboter_wasser}.py`, `tests/test_scenarios_e2e.py`.
@@ -231,9 +231,9 @@ Der Server läuft lokal über `stdio` (`mcp.server.fastmcp` bzw. `Server` aus de
 
 ---
 
-## 8. Ausblick Phase 2 (Integration in WoWannWas)
+## 8. Ausblick Phase 2 (Integration in WasWoWann)
 
-Sobald M1–M5 im Testbetrieb über MCP überzeugen, wird MetaCore in das bestehende `/Users/jan/WoWannWas`-System eingehängt:
+Sobald M1–M5 im Testbetrieb über MCP überzeugen, wird MetaCore in das bestehende `/Users/jan/WasWoWann`-System eingehängt:
 1. Einbindung von `metacore` als lokales Python-Paket im `backend/` oder gemeinsamer Zugriff auf dieselbe SQLite-Datei.
 2. REST-Endpunkte im FastAPI-Backend für Karte, Zukunftsgraph und lokale Kausal-Linse.
 3. Erweiterung der bestehenden Next.js-Oberfläche (Zeitschieber über `JETZT` hinaus, σ-Trichter auf der MapLibre-Karte, Kausal-Linse in der rechten Sidebar) nach dem Design der Prototypen.

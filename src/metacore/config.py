@@ -1,4 +1,4 @@
-"""Configuration settings for WoWannWas MetaCore."""
+"""Configuration settings for WasWoWann MetaCore."""
 
 from __future__ import annotations
 
