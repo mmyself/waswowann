@@ -822,3 +822,132 @@ def test_recipe_mix_weighted_sum_limiting_factor_ratios_and_modifiers(
     assert pred_limit is not None
     assert pred_limit.value_num == pytest.approx(8.0)
     assert pred_limit.meta["limiting_ingredient"] == "butter_mass"
+
+
+def test_live_duration_modifier_reapplies_unless_measured(repo: MetaCoreRepository) -> None:
+    engine = MetaCoreEngine(repo)
+    fungus = repo.create_entity(EntityCreate(name="Hericium Test", kind="worldline", category="Pilz"))
+    box = repo.create_entity(EntityCreate(name="Box Test", kind="worldline", category="umgebung"))
+    t0 = 1_795_000_000_000
+
+    pins = repo.create_state(
+        StateCreate(
+            entity_id=fungus.id,
+            modality="observed",
+            source="measured",
+            property_name="growth_g",
+            label="Primordien",
+            value_num=10.0,
+            value_sigma=1.0,
+            value_unit="g",
+            time_ms=t0,
+        )
+    )
+    temp0 = repo.create_state(
+        StateCreate(
+            entity_id=box.id,
+            modality="observed",
+            source="measured",
+            property_name="temperature_c",
+            label="Start 16 °C",
+            value_num=16.0,
+            value_sigma=0.5,
+            value_unit="°C",
+            time_ms=t0,
+        )
+    )
+    tpl = repo.create_transformation(
+        TransformationCreate(
+            name="Wachstum",
+            modality="template",
+            driver="nature",
+            duration_seconds=10 * 86_400,
+            duration_sigma_seconds=1 * 86_400,
+            duration_source="ai_prior",
+            formula={
+                "kind": "duration_step",
+                "output_property": "growth_g",
+                "output_value": 100.0,
+                "output_sigma": 5.0,
+                "input_roles": {"growth_g": "consumes", "temperature_c": "triggers"},
+                "modifiers": [
+                    {
+                        "entity_id": box.id,
+                        "property_name": "temperature_c",
+                        "applies_to": "duration",
+                        "optimal_min": 18.0,
+                        "optimal_max": 22.0,
+                        "falloff_per_unit": 0.05,
+                        "min_factor": 0.5,
+                        "sigma_penalty_per_unit": 0.0,
+                    }
+                ],
+            },
+        )
+    )
+
+    fb_init = engine.instantiate_template(
+        tpl.id,
+        input_state_ids=[pins.id, temp0.id],
+        target_entity_id=fungus.id,
+        start_time_ms=t0,
+    )
+    pred_id = fb_init.created_state_ids[0]
+    planned_tx = repo.list_transformations(modality="planned")[0]
+    assert planned_tx.duration_seconds == pytest.approx(10 * 86_400 / 0.90)
+    pred_init = repo.get_state(pred_id)
+    assert pred_init is not None
+    assert pred_init.time_ms == t0 + int((10 * 86_400 / 0.90) * 1000)
+
+    # Raising temperature into optimal [18, 22] restores base 10 d duration live
+    fb_warm = engine.record_observation(
+        StateCreate(
+            entity_id=box.id,
+            modality="observed",
+            source="measured",
+            property_name="temperature_c",
+            label="Warm 18 °C",
+            value_num=18.0,
+            value_sigma=0.5,
+            value_unit="°C",
+            time_ms=t0 + 2 * 86_400_000,
+        )
+    )
+    assert pred_id in fb_warm.updated_state_ids
+    planned_warm = repo.get_transformation(planned_tx.id)
+    pred_warm = repo.get_state(pred_id)
+    assert planned_warm is not None and planned_warm.duration_seconds == pytest.approx(10 * 86_400)
+    assert pred_warm is not None and pred_warm.time_ms == t0 + 10 * 86_400_000
+
+    # Harvest calibrates template -> duration_source='measured'; later temperature changes do NOT overwrite
+    fb_harvest = engine.record_observation(
+        StateCreate(
+            entity_id=fungus.id,
+            modality="observed",
+            source="measured",
+            property_name="growth_g",
+            label="Ernte",
+            value_num=100.0,
+            value_sigma=2.0,
+            value_unit="g",
+            time_ms=t0 + 9 * 86_400_000,
+        )
+    )
+    assert tpl.id in fb_harvest.calibrated_template_ids
+
+    fb_cold = engine.record_observation(
+        StateCreate(
+            entity_id=box.id,
+            modality="observed",
+            source="measured",
+            property_name="temperature_c",
+            label="Später 12 °C",
+            value_num=12.0,
+            value_sigma=0.5,
+            value_unit="°C",
+            time_ms=t0 + 9 * 86_400_000 + 60_000,
+        )
+    )
+    assert pred_id not in fb_cold.updated_state_ids
+    planned_after = repo.get_transformation(planned_tx.id)
+    assert planned_after is not None and planned_after.duration_seconds == pytest.approx(10 * 86_400)

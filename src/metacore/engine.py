@@ -1255,6 +1255,8 @@ class MetaCoreEngine:
                         if template.id not in calibrated_ids:
                             calibrated_ids.append(template.id)
 
+        updated_state_ids.extend(self._reapply_modifiers_for_observation(obs))
+
         return self._build_feedback(
             created_state_ids=[obs.id],
             updated_state_ids=updated_state_ids,
@@ -1262,6 +1264,64 @@ class MetaCoreEngine:
             calibrated_template_ids=calibrated_ids,
             summary=f"Beobachtung '{obs.label}' gespeichert.",
         )
+
+    def _reapply_modifiers_for_observation(self, obs: State) -> list[str]:
+        """Re-evaluate duration modifiers on active planned transformations when a relevant observation arrives."""
+        if obs.value_num is None:
+            return []
+        updated_ids: list[str] = []
+        for tx in self.repo.list_transformations(modality="planned"):
+            if tx.template_id is None or tx.duration_source == "measured":
+                continue
+            modifiers = list(tx.formula.get("modifiers", []))
+            if not modifiers:
+                continue
+            relevant = any(
+                str(mod.get("applies_to", "output")) == "duration"
+                and mod.get("property_name") == obs.property_name
+                and (mod.get("entity_id") is None or mod.get("entity_id") == obs.entity_id)
+                for mod in modifiers
+            )
+            if not relevant:
+                continue
+            template = self.repo.get_transformation(tx.template_id)
+            if template is None or template.duration_source == "measured":
+                continue
+            in_edges = self.repo.list_edges(transformation_id=tx.id, direction="in")
+            in_states = [
+                st
+                for e in in_edges
+                if (st := self.repo.get_state(e.state_id)) is not None
+            ]
+            _, mod_dur_s, mod_dur_sigma_s = self._apply_modifiers(
+                output_value=None,
+                duration_seconds=template.duration_seconds,
+                duration_sigma_seconds=template.duration_sigma_seconds,
+                modifiers=modifiers,
+                inputs=in_states,
+            )
+            self.repo.update_transformation(
+                tx.id,
+                duration_seconds=mod_dur_s,
+                duration_sigma_seconds=mod_dur_sigma_s,
+            )
+            scheduled_start_ms = tx.meta.get("scheduled_start_ms")
+            if scheduled_start_ms is not None and mod_dur_s is not None:
+                in_sigmas_s = [s.sigma_seconds for s in in_states if s.sigma_seconds is not None]
+                base_time_sigma = max(in_sigmas_s) if in_sigmas_s else 0.0
+                out_time_ms = int(scheduled_start_ms) + int(mod_dur_s * 1000)
+                out_time_sigma = math.hypot(base_time_sigma, mod_dur_sigma_s or 0.0) or None
+                for out_edge in self.repo.list_edges(transformation_id=tx.id, direction="out"):
+                    out_st = self.repo.get_state(out_edge.state_id)
+                    if out_st is not None and out_st.modality == "predicted":
+                        self.repo.update_state(
+                            out_st.id,
+                            time_ms=out_time_ms,
+                            sigma_seconds=out_time_sigma,
+                        )
+                        if out_st.id not in updated_ids:
+                            updated_ids.append(out_st.id)
+        return updated_ids
 
     def _matching_trigger_templates(self, obs: State) -> list[str]:
         matched: list[str] = []

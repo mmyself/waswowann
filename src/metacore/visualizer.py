@@ -370,15 +370,77 @@ def _run_roboter_wasser_scenario() -> dict[str, Any]:
 def _run_igel_stachelbart_scenario() -> dict[str, Any]:
     with _temp_engine("igel_stachelbart.sqlite3") as (repo, engine):
         t0 = 1_794_767_346_000
-        ids = seed_igel_stachelbart(repo, engine, t0_ms=t0)
+        ids = seed_igel_stachelbart(repo, engine, t0_ms=t0, include_warmup_phase=False)
         phase_0 = export_graph_snapshot(
             repo,
             engine,
-            title="4 Indoor-Fotos + AI-Prior-Dauer",
+            title="Tag 0–3: Start bei 16 °C & 80 ± 10 % rF",
             subtitle=(
-                "Gleiche Quelle Handy_Indoor erhält σ = 12 m ohne Scheinpräzision; "
-                "Fruchtungsdauer startet bei 8 d ± 2 d (ai_prior)."
+                "Kühler Start (16 °C) dehnt die AI-Prior-Dauer leicht auf 8,33 d; "
+                "Luftfeuchtigkeit 80 ± 10 % liegt im Korridor [60; 100] % (Stufe 2)."
             ),
+        )
+
+        fb_climate = None
+        for day in (4, 6):
+            engine.record_observation(
+                StateCreate(
+                    entity_id=ids["hericium_id"],
+                    modality="observed",
+                    source="measured",
+                    measurement_source="Handy_Indoor",
+                    property_name="location",
+                    label=f"Indoor-Foto Tag {day}",
+                    lat=53.55828,
+                    lon=9.80831,
+                    sigma_meters=12.0,
+                    location_label="Indoor Fruchtungsbox",
+                    time_ms=t0 + day * 86_400_000,
+                    sigma_seconds=30.0,
+                )
+            )
+            engine.record_observation(
+                StateCreate(
+                    entity_id=ids["box_id"],
+                    modality="observed",
+                    source="measured",
+                    measurement_source="Hygrometer_Box",
+                    property_name="humidity_pct",
+                    label=f"Luftfeuchtigkeit Tag {day} (80 ± 10 %)",
+                    value_num=80.0,
+                    value_sigma=10.0,
+                    value_unit="%",
+                    location_label="Indoor Fruchtungsbox",
+                    time_ms=t0 + day * 86_400_000,
+                    sigma_seconds=30.0,
+                )
+            )
+            fb_climate = engine.record_observation(
+                StateCreate(
+                    entity_id=ids["box_id"],
+                    modality="observed",
+                    source="measured",
+                    measurement_source="Thermometer_Box",
+                    property_name="temperature_c",
+                    label=f"Box-Temperatur Tag {day} (18 °C)",
+                    value_num=18.0,
+                    value_sigma=0.5,
+                    value_unit="°C",
+                    location_label="Indoor Fruchtungsbox",
+                    time_ms=t0 + day * 86_400_000,
+                    sigma_seconds=30.0,
+                )
+            )
+
+        phase_1 = export_graph_snapshot(
+            repo,
+            engine,
+            title="Tag 4–6: Temperatur steigt auf 18 °C",
+            subtitle=(
+                "4 Indoor-Fotos halten σ = 12 m ohne Scheinpräzision; "
+                "18 °C ziehen die Live-Fruchtungsprognose zurück auf 8,0 d (Stufe 2)."
+            ),
+            last_feedback=fb_climate,
         )
 
         fb_harvest = engine.record_observation(
@@ -397,10 +459,10 @@ def _run_igel_stachelbart_scenario() -> dict[str, Any]:
                 sigma_seconds=60.0,
             )
         )
-        phase_1 = export_graph_snapshot(
+        phase_2 = export_graph_snapshot(
             repo,
             engine,
-            title="Ernte 265 g nach 8,92 Tagen",
+            title="Tag 8,92: Ernte 265 g (Kalibrierung)",
             subtitle=(
                 "Realer WoWannWas-Zeitstempel (8,92 d) kalibriert das Fruchtungs-Template auf 'measured'."
             ),
@@ -411,10 +473,11 @@ def _run_igel_stachelbart_scenario() -> dict[str, Any]:
         "id": "igel_stachelbart",
         "title": "4. Igel-Stachelbart (Reale WoWannWas-Daten)",
         "description": (
-            "Reale Timelapse-Spanne aus WoWannWas: 4 Indoor-Aufnahmen ohne Abhängigkeits-Fehler "
-            "und automatische Dauer-Kalibrierung nach der Ernte."
+            "Reale Timelapse-Spanne aus WoWannWas plus Klima-Tracking der Indoor Fruchtungsbox "
+            "(16 °C → 18 °C, 80 ± 10 % rF), Handy_Indoor-Deduplizierung (σ = 12 m) und "
+            "automatische Dauer-Kalibrierung nach 8,92 Tagen."
         ),
-        "phases": [phase_0, phase_1],
+        "phases": [phase_0, phase_1, phase_2],
     }
 
 

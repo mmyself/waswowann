@@ -90,15 +90,30 @@ def test_build_demo_scenarios_payload_real_engine_metrics() -> None:
     assert rw[3]["goal_evaluations"][0]["status"] == "cancelled"
     assert rw[3]["uses_conflicts"] == []
 
-    # 4. Igel-Stachelbart indoor deduplication & real harvest duration calibration
+    # 4. Igel-Stachelbart climate phases (16 °C -> 18 °C, 80 ± 10 % rF), deduplication & calibration
     ig = scenarios["igel_stachelbart"]["phases"]
-    assert len(ig) == 2
+    assert len(ig) == 3
     assert len(ig[0]["entity_geo_fusions"]) == 1
-    assert ig[0]["entity_geo_fusions"][0]["observation_count"] == 4
+    assert ig[0]["entity_geo_fusions"][0]["observation_count"] == 2
     assert ig[0]["entity_geo_fusions"][0]["sigma_meters"] == pytest.approx(12.0)
     assert ig[0]["templates"][0]["duration_source"] == "ai_prior"
-    assert ig[1]["templates"][0]["duration_source"] == "measured"
-    dur = ig[1]["templates"][0]["duration_seconds"]
+    ig0_planned = [t for t in ig[0]["transformations"] if t["modality"] == "planned"]
+    assert len(ig0_planned) == 1 and ig0_planned[0]["duration_seconds"] > 8.2 * 86_400
+    assert ig[0]["goal_evaluations"][0]["stage"] == 2
+    ig0_temps = [s for s in ig[0]["states"] if s["property_name"] == "temperature_c"]
+    assert ig0_temps[-1]["value_num"] == pytest.approx(16.0)
+
+    assert ig[1]["entity_geo_fusions"][0]["observation_count"] == 4
+    assert ig[1]["entity_geo_fusions"][0]["sigma_meters"] == pytest.approx(12.0)
+    assert ig[1]["templates"][0]["duration_source"] == "ai_prior"
+    ig1_planned = [t for t in ig[1]["transformations"] if t["modality"] == "planned"]
+    assert len(ig1_planned) == 1 and ig1_planned[0]["duration_seconds"] == pytest.approx(8.0 * 86_400)
+    assert ig[1]["goal_evaluations"][0]["stage"] == 2
+    ig1_temps = [s for s in ig[1]["states"] if s["property_name"] == "temperature_c"]
+    assert ig1_temps[-1]["value_num"] == pytest.approx(18.0)
+
+    assert ig[2]["templates"][0]["duration_source"] == "measured"
+    dur = ig[2]["templates"][0]["duration_seconds"]
     assert dur is not None and 8.5 * 86_400 <= dur <= 9.2 * 86_400
 
     # 5. Substrat-Rezept multi-input recipe_mix + ratio guard transitions
