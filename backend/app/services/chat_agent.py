@@ -25,6 +25,7 @@ from app.services.metacore_bridge import (
 )
 from metacore.db import now_ms as mc_now_ms
 from metacore.models import StateCreate
+from metacore.templates import search_template_catalog
 
 ChatScopeType = Literal["global", "entity"]
 
@@ -161,6 +162,8 @@ def _parse_llm_json(raw_text: str) -> tuple[str, list[dict[str, Any]]]:
 
 def _build_context_snapshot(scope_type: ChatScopeType, scope_id: str) -> dict[str, Any]:
     snap = build_live_snapshot(auto_sync=True)
+    repo, _ = open_metacore()
+    template_catalog = search_template_catalog(repo, only_roots=True)
     with db() as conn:
         obs_rows = conn.execute(
             """
@@ -249,6 +252,20 @@ def _build_context_snapshot(scope_type: ChatScopeType, scope_id: str) -> dict[st
         ][:20],
         "uses_conflicts": snap.get("uses_conflicts", []),
         "periodicity_summary": (snap.get("periodicity") or {}).get("summary"),
+        "templates": [
+            {
+                "id": t["template"]["id"],
+                "name": t["template"]["name"],
+                "domain": t["profile"]["domain"],
+                "scientific_name": t["profile"]["scientific_name"],
+                "aliases": t["profile"]["aliases"],
+                "template_kind": t["profile"]["template_kind"],
+                "maturity": t["profile"]["maturity"],
+                "observations_count": t["profile"]["observations_count"],
+                "children_count": len(t["children"]),
+            }
+            for t in template_catalog["templates"][:30]
+        ],
         "focus_observation": (
             {
                 "id": focus_obs["id"],

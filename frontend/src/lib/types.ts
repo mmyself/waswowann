@@ -479,3 +479,55 @@ export interface ChatSendResponse {
   snapshot: ZukunftsgraphSnapshot;
   updated_observation: ObservationDetail | null;
 }
+
+export type TemplateKind = "playbook" | "step" | "trigger" | "model";
+export type TemplateMaturity = "ai_prior" | "calibrated" | "proven" | "archived";
+
+export interface TemplateAppliesTo {
+  entity_categories: string[];
+  scientific_names: string[];
+  required_properties: string[];
+  context: Record<string, string>;
+}
+
+export interface TemplateProfile {
+  domain: string;
+  category: string;
+  scientific_name: string | null;
+  canonical_name: string | null;
+  taxon_path: string[];
+  aliases: string[];
+  template_kind: TemplateKind;
+  applies_to: TemplateAppliesTo;
+  produces_property: string | null;
+  produces_unit: string;
+  expected_output_num: number | null;
+  expected_output_sigma: number | null;
+  total_duration_seconds: number | null;
+  observations_count: number;
+  maturity: TemplateMaturity;
+  calibration_history: Array<Record<string, unknown>>;
+  child_count: number;
+}
+
+export interface TemplateCatalogItem {
+  template: MetaCoreTransformation;
+  calibration_status: {
+    factor_source: string | null;
+    duration_source: string;
+  };
+  profile: TemplateProfile;
+  children: TemplateCatalogItem[];
+  match_score: number;
+  match_reasons: string[];
+}
+
+export interface TemplateCatalogResponse {
+  templates: TemplateCatalogItem[];
+  count: number;
+  facets: {
+    domains: string[];
+    scientific_names: string[];
+    maturities: Record<string, number>;
+  };
+}

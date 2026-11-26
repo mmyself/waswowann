@@ -349,3 +349,48 @@ def test_goal_patch_metadata_and_raw_samples_rollup_api(client: TestClient, conf
     assert rolled["value_unit"] == "°C"
     assert math.isclose(rolled["value_num"], 18.5, rel_tol=1e-4)
     assert rolled["meta"]["rollup"]["n"] == 2
+
+
+def test_template_catalog_create_search_and_entity_matching(client: TestClient, config):
+    _insert_obs_with_photos(
+        config,
+        obs_id="hericium-tpl-obs",
+        title="Igel-Stachelbart (Hericium erinaceus)",
+        environment="indoor",
+        photos=[{"id": "m-t1", "lat": 53.55828, "lon": 9.80831, "sigma_meters": 10.0, "time_ms": 1_795_500_000_000}],
+    )
+    assert client.post("/api/zukunftsgraph/sync", headers=HEADERS, json={"seed_plans": False}).status_code == 200
+
+    created = client.post(
+        "/api/zukunftsgraph/templates",
+        headers=HEADERS,
+        json={
+            "name": "Igel-Stachelbart Klon-Test",
+            "driver": "actor",
+            "domain": "pilzzucht",
+            "category": "Pilz",
+            "scientific_name": "Hericium erinaceus",
+            "aliases": ["Löwenmähne", "Igelstachelbart"],
+            "template_kind": "step",
+            "duration_seconds": 6 * 86_400.0,
+            "duration_sigma_seconds": 86_400.0,
+            "output_property": "harvest_ready",
+            "output_value": 120.0,
+            "output_sigma": 20.0,
+            "output_unit": "g",
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["profile"]["scientific_name"] == "Hericium erinaceus"
+
+    # Fuzzy alias query with umlaut folding
+    by_alias = client.get("/api/zukunftsgraph/templates?query=Loewenmaehne&only_roots=true")
+    assert by_alias.status_code == 200
+    assert any(item["template"]["name"] == "Igel-Stachelbart Klon-Test" for item in by_alias.json()["templates"])
+
+    # Scientific name & entity matching
+    by_ent = client.get("/api/zukunftsgraph/templates?entity_id=hericium-tpl-obs&only_roots=true")
+    assert by_ent.status_code == 200
+    match = next(item for item in by_ent.json()["templates"] if item["template"]["name"] == "Igel-Stachelbart Klon-Test")
+    assert match["match_score"] >= 60.0
+    assert any("Hericium erinaceus" in reason for reason in match["match_reasons"])

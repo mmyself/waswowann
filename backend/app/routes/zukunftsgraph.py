@@ -18,8 +18,17 @@ from app.services.metacore_bridge import (
 )
 from metacore.clocks import ClockId
 from metacore.db import now_ms as mc_now_ms
-from metacore.models import EvidenceRef, RawSampleCreate, StateCreate, Visibility
+from metacore.models import (
+    DurationSource,
+    EvidenceRef,
+    RawSampleCreate,
+    StateCreate,
+    TransformationCreate,
+    TransformationDriver,
+    Visibility,
+)
 from metacore.rollup import RollupWindowKind
+from metacore.templates import TemplateKind, TemplateMaturity, extract_template_profile, search_template_catalog
 
 router = APIRouter(prefix="/api/zukunftsgraph", tags=["zukunftsgraph"])
 
@@ -114,6 +123,28 @@ class PeriodAnalyzeRequest(BaseModel):
     label: str = Field(default="Zeitreihe", max_length=200)
     tidal_offset_hours: float = 0.0
     now_ms: int | None = None
+
+
+class MetaTemplateCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    driver: TransformationDriver = "actor"
+    domain: str = Field(default="general", min_length=1, max_length=80)
+    category: str = Field(default="general", min_length=1, max_length=80)
+    scientific_name: str | None = Field(default=None, max_length=200)
+    canonical_name: str | None = Field(default=None, max_length=200)
+    taxon_path: list[str] = Field(default_factory=list)
+    aliases: list[str] = Field(default_factory=list)
+    template_kind: TemplateKind | None = None
+    parent_id: str | None = Field(default=None, max_length=128)
+    duration_seconds: float | None = Field(default=None, ge=0.0)
+    duration_sigma_seconds: float | None = Field(default=None, gt=0.0)
+    duration_source: DurationSource = "ai_prior"
+    output_property: str | None = Field(default=None, max_length=120)
+    output_value: float | None = None
+    output_sigma: float | None = Field(default=None, ge=0.0)
+    output_unit: str = Field(default="", max_length=40)
+    applies_to: dict[str, Any] = Field(default_factory=dict)
+    notes: str = Field(default="", max_length=2000)
 
 
 @router.get("/snapshot")
@@ -378,3 +409,108 @@ def post_analyze_periods(payload: PeriodAnalyzeRequest) -> dict[str, Any]:
         tidal_offset_hours=payload.tidal_offset_hours,
         now_ms_override=payload.now_ms,
     )
+
+
+@router.get("/templates")
+def get_templates(
+    query: str = Query(default=""),
+    category: str | None = Query(default=None),
+    domain: str | None = Query(default=None),
+    scientific_name: str | None = Query(default=None),
+    driver: TransformationDriver | None = Query(default=None),
+    template_kind: TemplateKind | None = Query(default=None),
+    maturity: TemplateMaturity | None = Query(default=None),
+    only_roots: bool = Query(default=True),
+    include_archived: bool = Query(default=False),
+    entity_id: str | None = Query(default=None),
+) -> dict[str, Any]:
+    repo, _ = open_metacore()
+    resolved_entity: str | None = None
+    if entity_id is not None and entity_id.strip():
+        resolved_entity = resolve_entity_id(repo, entity_id.strip())
+        if resolved_entity is None:
+            return {
+                "templates": [],
+                "count": 0,
+                "facets": {"domains": [], "scientific_names": [], "maturities": {}},
+            }
+    return search_template_catalog(
+        repo,
+        query=query,
+        category=category,
+        domain=domain,
+        scientific_name=scientific_name,
+        driver=driver,
+        template_kind=template_kind,
+        maturity=maturity,
+        only_roots=only_roots,
+        include_archived=include_archived,
+        applies_to_entity_id=resolved_entity,
+    )
+
+
+@router.post("/templates", status_code=201)
+def post_template(payload: MetaTemplateCreateRequest) -> dict[str, Any]:
+    repo, _ = open_metacore()
+    if payload.parent_id and repo.get_transformation(payload.parent_id) is None:
+        raise _error(404, "PARENT_TEMPLATE_NOT_FOUND", f"Eltern-Vorlage nicht gefunden: {payload.parent_id}")
+
+    formula: dict[str, Any] = {}
+    if payload.output_property and payload.output_property.strip():
+        formula = {
+            "kind": "duration_step",
+            "output_property": payload.output_property.strip(),
+            "output_unit": payload.output_unit.strip(),
+        }
+        if payload.output_value is not None:
+            formula["output_value"] = payload.output_value
+        if payload.output_sigma is not None:
+            formula["output_sigma"] = payload.output_sigma
+
+    sci = payload.scientific_name.strip() if payload.scientific_name and payload.scientific_name.strip() else None
+    canon = (
+        payload.canonical_name.strip()
+        if payload.canonical_name and payload.canonical_name.strip()
+        else sci
+    )
+    meta: dict[str, Any] = {
+        "domain": payload.domain.strip().lower() or "general",
+        "category": payload.category.strip() or "general",
+    }
+    if sci:
+        meta["scientific_name"] = sci
+    if canon:
+        meta["canonical_name"] = canon
+    if payload.taxon_path:
+        meta["taxon_path"] = [t.strip() for t in payload.taxon_path if t.strip()]
+    if payload.aliases:
+        meta["aliases"] = [a.strip() for a in payload.aliases if a.strip()]
+    if payload.template_kind:
+        meta["template_kind"] = payload.template_kind
+    if payload.applies_to:
+        meta["applies_to"] = payload.applies_to
+    if payload.notes.strip():
+        meta["notes"] = payload.notes.strip()
+
+    try:
+        tpl = repo.create_transformation(
+            TransformationCreate(
+                name=payload.name.strip(),
+                modality="template",
+                driver=payload.driver,
+                parent_id=payload.parent_id,
+                duration_seconds=payload.duration_seconds,
+                duration_sigma_seconds=payload.duration_sigma_seconds,
+                duration_source=payload.duration_source,
+                formula=formula,
+                meta=meta,
+            )
+        )
+    except (ValueError, TypeError) as exc:
+        raise _error(400, "INVALID_TEMPLATE", str(exc)) from exc
+
+    return {
+        "template": tpl.model_dump(),
+        "profile": extract_template_profile(tpl),
+        "catalog": search_template_catalog(repo, only_roots=True),
+    }

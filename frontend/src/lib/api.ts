@@ -14,6 +14,9 @@ import type {
   ObservationListResponse,
   PeriodicityReport,
   PublicConfig,
+  TemplateCatalogResponse,
+  TemplateKind,
+  TemplateMaturity,
   WorldlineInspection,
   ZukunftsgraphSnapshot,
 } from "./types";
@@ -251,4 +254,55 @@ export const api = {
     body.append("audio", blob, filename);
     return request<{ text: string }>("/api/chat/transcribe", { method: "POST", body });
   },
+  templates: (
+    params?: {
+      query?: string;
+      domain?: string;
+      scientific_name?: string;
+      driver?: "actor" | "nature";
+      template_kind?: TemplateKind;
+      maturity?: TemplateMaturity;
+      only_roots?: boolean;
+      include_archived?: boolean;
+      entity_id?: string;
+    },
+    signal?: AbortSignal
+  ) => {
+    const qs = new URLSearchParams();
+    if (params?.query) qs.set("query", params.query);
+    if (params?.domain) qs.set("domain", params.domain);
+    if (params?.scientific_name) qs.set("scientific_name", params.scientific_name);
+    if (params?.driver) qs.set("driver", params.driver);
+    if (params?.template_kind) qs.set("template_kind", params.template_kind);
+    if (params?.maturity) qs.set("maturity", params.maturity);
+    if (params?.only_roots !== undefined) qs.set("only_roots", params.only_roots ? "true" : "false");
+    if (params?.include_archived !== undefined) qs.set("include_archived", params.include_archived ? "true" : "false");
+    if (params?.entity_id) qs.set("entity_id", params.entity_id);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return request<TemplateCatalogResponse>(`/api/zukunftsgraph/templates${suffix}`, { signal });
+  },
+  createTemplate: (payload: {
+    name: string;
+    driver: "actor" | "nature";
+    domain: string;
+    category: string;
+    scientific_name?: string;
+    canonical_name?: string;
+    taxon_path?: string[];
+    aliases?: string[];
+    template_kind?: TemplateKind;
+    parent_id?: string;
+    duration_seconds?: number;
+    duration_sigma_seconds?: number;
+    duration_source?: "ai_prior" | "measured" | "derived";
+    output_property?: string;
+    output_value?: number;
+    output_sigma?: number;
+    output_unit?: string;
+    notes?: string;
+  }) =>
+    request<{ template: Record<string, unknown>; catalog: TemplateCatalogResponse }>(
+      "/api/zukunftsgraph/templates",
+      { method: "POST", body: JSON.stringify(payload) }
+    ),
 };

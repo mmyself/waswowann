@@ -3,7 +3,7 @@
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { api, ApiError, mediaUrl } from "@/lib/api";
-import { CATEGORIES, MediaItem, MediaMeasurementPatch, MergeCandidate, ObservationDetail, WorldlineInspection, ZukunftsgraphSnapshot } from "@/lib/types";
+import { CATEGORIES, MediaItem, MediaMeasurementPatch, MergeCandidate, ObservationDetail, TemplateCatalogItem, WorldlineInspection, ZukunftsgraphSnapshot } from "@/lib/types";
 import { DISPLAY_TIMEZONE, formatDate, formatDateSpan, formatPhotoDate, fromLocalInput, toLocalInput } from "@/lib/time-filter";
 import { formatMetaDate, goalStatusLabel } from "@/lib/zukunftsgraph";
 import AnalysisPanel from "./AnalysisPanel";
@@ -47,6 +47,7 @@ function DetailContent({ detail, onSave, onMeasurementsChanged, pickedDraftLocat
   const [mergeError, setMergeError] = useState("");
   const [confirmMergeId, setConfirmMergeId] = useState<string | null>(null);
   const [worldline, setWorldline] = useState<WorldlineInspection | null>(null);
+  const [matchingTemplates, setMatchingTemplates] = useState<TemplateCatalogItem[]>([]);
   const [showGoalForm, setShowGoalForm] = useState(false);
   const [goalLabel, setGoalLabel] = useState("");
   const [goalProp, setGoalProp] = useState("presence");
@@ -73,6 +74,9 @@ function DetailContent({ detail, onSave, onMeasurementsChanged, pickedDraftLocat
   useEffect(() => {
     const controller = new AbortController();
     api.worldline(id, controller.signal).then((wl) => setWorldline(wl)).catch(() => { if (!controller.signal.aborted) setWorldline(null); });
+    api.templates({ entity_id: id, only_roots: true }, controller.signal)
+      .then((res) => setMatchingTemplates(res.templates))
+      .catch(() => { if (!controller.signal.aborted) setMatchingTemplates([]); });
     return () => controller.abort();
   }, [id, detail.updated_at]);
 
@@ -297,6 +301,32 @@ function DetailContent({ detail, onSave, onMeasurementsChanged, pickedDraftLocat
           <div className="worldline-period-badge">
             <span>Erkannte Periode</span>
             <strong>{worldline.periodicity.summary}</strong>
+          </div>
+        )}
+        {matchingTemplates.length > 0 && (
+          <div className="worldline-templates">
+            <p className="eyebrow">Passende Vorlagen ({matchingTemplates.length})</p>
+            <div className="worldline-template-list">
+              {matchingTemplates.slice(0, 4).map((item) => (
+                <div key={item.template.id} className="worldline-template-item">
+                  <div className="worldline-template-head">
+                    <strong>{item.template.name}</strong>
+                    <span className={`tpl-maturity is-${item.profile.maturity}`}>
+                      {item.profile.maturity === "proven"
+                        ? `Bewährt (n=${item.profile.observations_count})`
+                        : item.profile.maturity === "calibrated"
+                        ? `Kalibriert (n=${item.profile.observations_count})`
+                        : "KI-Prior"}
+                    </span>
+                  </div>
+                  <small>
+                    {item.profile.scientific_name ? <em>{item.profile.scientific_name}</em> : null}
+                    {item.profile.scientific_name && item.match_reasons.length > 0 ? " · " : ""}
+                    {item.match_reasons.join(", ")}
+                  </small>
+                </div>
+              ))}
+            </div>
           </div>
         )}
         <div className="worldline-actions">

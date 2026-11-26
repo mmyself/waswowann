@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -24,6 +23,12 @@ from metacore.models import (
     Visibility,
 )
 from metacore.repository import MetaCoreRepository
+from metacore.templates import (
+    TemplateKind,
+    TemplateMaturity,
+    extract_template_profile,
+    search_template_catalog,
+)
 
 
 def _resolve_entity(
@@ -185,32 +190,37 @@ def create_server(config: Settings | None = None) -> FastMCP:
         }
 
     @mcp.tool()
-    def search_templates(query: str = "", category: str | None = None) -> dict[str, Any]:
-        """Durchsucht gespeicherte Vorlagen (Rezepte/Skills/Naturprozesse) inkl. Kalibrierungsstatus."""
-        needle = query.strip().lower()
-        items: list[dict[str, Any]] = []
-        for tpl in repo.list_transformations(modality="template"):
-            tpl_cat = str(tpl.meta.get("category", ""))
-            if category is not None and tpl_cat != category:
-                continue
-            haystack = f"{tpl.name} {json.dumps(tpl.formula)} {json.dumps(tpl.meta)}".lower()
-            if needle and needle not in haystack:
-                continue
-            factor_src = (
-                tpl.formula["factor"].get("source")
-                if isinstance(tpl.formula.get("factor"), dict)
-                else None
-            )
-            items.append(
-                {
-                    "template": tpl.model_dump(),
-                    "calibration_status": {
-                        "factor_source": factor_src,
-                        "duration_source": tpl.duration_source,
-                    },
-                }
-            )
-        return {"templates": items, "count": len(items)}
+    def search_templates(
+        query: str = "",
+        category: str | None = None,
+        domain: str | None = None,
+        scientific_name: str | None = None,
+        driver: TransformationDriver | None = None,
+        template_kind: TemplateKind | None = None,
+        maturity: TemplateMaturity | None = None,
+        only_roots: bool = False,
+        include_archived: bool = False,
+        applies_to_entity_id_or_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Durchsucht Vorlagen nach Name, wissenschaftlichem Namen (z. B. Binomen), Aliasen, Facetten, Reifegrad und passender Entität."""
+        resolved_ent_id: str | None = None
+        if applies_to_entity_id_or_name is not None and applies_to_entity_id_or_name.strip():
+            resolved_ent_id = _resolve_entity(
+                repo, applies_to_entity_id_or_name, create_if_missing=False
+            ).id
+        return search_template_catalog(
+            repo,
+            query=query,
+            category=category,
+            domain=domain,
+            scientific_name=scientific_name,
+            driver=driver,
+            template_kind=template_kind,
+            maturity=maturity,
+            only_roots=only_roots,
+            include_archived=include_archived,
+            applies_to_entity_id=resolved_ent_id,
+        )
 
     @mcp.tool()
     def define_template(
@@ -225,10 +235,31 @@ def create_server(config: Settings | None = None) -> FastMCP:
         success_prob: float = 1.0,
         formula: dict[str, Any] | None = None,
         meta: dict[str, Any] | None = None,
+        domain: str | None = None,
+        scientific_name: str | None = None,
+        canonical_name: str | None = None,
+        taxon_path: list[str] | None = None,
+        aliases: list[str] | None = None,
+        template_kind: TemplateKind | None = None,
+        applies_to: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Speichert eine wiederverwendbare zeit-/ortlose Vorlage (inkl. Formeln, parent_id für Verschachtelung und ai_prior-Parameter)."""
+        """Speichert eine wiederverwendbare zeit-/ortlose Vorlage inkl. wissenschaftlichem Namen, Aliasen, Taxonomie & Verschachtelung."""
         merged_meta = dict(meta or {})
         merged_meta.setdefault("category", category)
+        if domain is not None and domain.strip():
+            merged_meta["domain"] = domain.strip().lower()
+        if scientific_name is not None and scientific_name.strip():
+            merged_meta["scientific_name"] = scientific_name.strip()
+        if canonical_name is not None and canonical_name.strip():
+            merged_meta["canonical_name"] = canonical_name.strip()
+        if taxon_path is not None:
+            merged_meta["taxon_path"] = [str(t).strip() for t in taxon_path if str(t).strip()]
+        if aliases is not None:
+            merged_meta["aliases"] = [str(a).strip() for a in aliases if str(a).strip()]
+        if template_kind is not None:
+            merged_meta["template_kind"] = template_kind
+        if applies_to is not None:
+            merged_meta["applies_to"] = applies_to
         tpl = repo.create_transformation(
             TransformationCreate(
                 name=name,
@@ -244,7 +275,7 @@ def create_server(config: Settings | None = None) -> FastMCP:
                 meta=merged_meta,
             )
         )
-        return {"template": tpl.model_dump()}
+        return {"template": tpl.model_dump(), "profile": extract_template_profile(tpl)}
 
     @mcp.tool()
     def instantiate_template(
