@@ -220,6 +220,13 @@
 .worldline-template-item{display:grid;gap:2px;padding:7px 9px;border:1px solid var(--line);background:#fcfcfa;font-size:11px}
 .worldline-template-head{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap}
 .worldline-template-item small{font-size:10px;color:var(--muted)}
+.tpl-onto-badge{display:inline-block;margin-left:6px;padding:1px 5px;border:1px solid var(--line);background:#f6f1e7;font:9px var(--mono);color:var(--muted);font-style:normal}
+.tpl-refs{display:grid;gap:2px;font-size:10px;color:var(--muted)}
+.tpl-refs span{font:9px var(--mono);text-transform:uppercase}
+.tpl-refs a{color:#1d4ed8;text-decoration:none;word-break:break-word}
+.tpl-refs a:hover{text-decoration:underline}
+.tpl-preview-box{display:grid;gap:6px;padding:9px 10px;border:1px solid var(--line);background:#fcfcfa;font-size:11px}
+.tpl-dup-warn{padding:6px 8px;border:1px solid #facc15;background:#fefce8;color:#713f12}
 @media(max-width:760px){.period-row{grid-template-columns:1fr;gap:6px}.period-next{text-align:left}}
 @media(max-width:960px){.zg-main-grid{grid-template-columns:1fr}}
 @media(max-width:900px){.upload-shell{padding-bottom:16px}.upload-intro{padding-top:36px}.uploaded-observation{margin-top:24px}.upload-nav-link{margin-left:auto}.map-overlays{top:auto;right:9px;bottom:36px;padding:6px;font-size:8px}.upload-results{overflow:hidden}}

@@ -3,7 +3,13 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { formatDurationDays } from "@/lib/zukunftsgraph";
-import type { TemplateCatalogItem, TemplateCatalogResponse, TemplateKind, TemplateMaturity } from "@/lib/types";
+import type {
+  TemplateCatalogItem,
+  TemplateCatalogResponse,
+  TemplateEnrichPreview,
+  TemplateKind,
+  TemplateMaturity,
+} from "@/lib/types";
 
 function maturityLabel(m: TemplateMaturity, count: number): string {
   if (m === "proven") return `Bewährt (n=${count})`;
@@ -51,6 +57,9 @@ export default function TemplatesPanel() {
   const [newOutProp, setNewOutProp] = useState("");
   const [newOutVal, setNewOutVal] = useState("");
   const [newOutUnit, setNewOutUnit] = useState("");
+  const [autoEnrich, setAutoEnrich] = useState(true);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [enrichPreview, setEnrichPreview] = useState<TemplateEnrichPreview | null>(null);
 
   const loadCatalog = useCallback(
     (signal?: AbortSignal) => {
@@ -126,6 +135,7 @@ export default function TemplatesPanel() {
         output_property: newOutProp.trim() || undefined,
         output_value: outValNum,
         output_unit: newOutUnit.trim() || undefined,
+        auto_enrich: autoEnrich,
       });
       setCatalog(res.catalog);
       setNewName("");
@@ -135,11 +145,50 @@ export default function TemplatesPanel() {
       setNewOutProp("");
       setNewOutVal("");
       setNewOutUnit("");
+      setEnrichPreview(null);
       setShowCreateForm(false);
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.message : "Vorlage konnte nicht erstellt werden.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handlePreviewEnrichment = async () => {
+    if (!newName.trim() && !newSciName.trim()) {
+      setError("Bitte zuerst einen Namen oder wissenschaftlichen Namen eingeben.");
+      return;
+    }
+    setPreviewBusy(true);
+    setError("");
+    try {
+      const preview = await api.previewTemplateEnrichment({
+        name: newName.trim() || newSciName.trim(),
+        scientific_name: newSciName.trim() || undefined,
+        category: newCategory.trim() || "general",
+        domain: newDomain.trim() || "general",
+        duration_source: "ai_prior",
+      });
+      setEnrichPreview(preview);
+      if (preview.taxonomy) {
+        if (!newSciName.trim()) setNewSciName(preview.taxonomy.scientific_name);
+        if (preview.taxonomy.synonyms.length) {
+          const existing = newAliases.split(",").map((s) => s.trim()).filter(Boolean);
+          const low = new Set(existing.map((s) => s.toLowerCase()));
+          const merged = [...existing];
+          for (const syn of preview.taxonomy.synonyms.slice(0, 5)) {
+            if (!low.has(syn.toLowerCase())) {
+              low.add(syn.toLowerCase());
+              merged.push(syn);
+            }
+          }
+          setNewAliases(merged.join(", "));
+        }
+      }
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : "Vorab-Prüfung fehlgeschlagen.");
+    } finally {
+      setPreviewBusy(false);
     }
   };
 
@@ -161,9 +210,10 @@ export default function TemplatesPanel() {
         </div>
 
         <h3 className="tpl-card__title">{template.name}</h3>
-        {profile.scientific_name && (
+        {(profile.scientific_name || profile.ontology_id) && (
           <p className="tpl-sci" title={profile.taxon_path.join(" → ") || undefined}>
-            <em>{profile.scientific_name}</em>
+            {profile.scientific_name && <em>{profile.scientific_name}</em>}
+            {profile.ontology_id && <span className="tpl-onto-badge">{profile.ontology_id}</span>}
             {profile.taxon_path.length > 1 && <small> · {profile.taxon_path.slice(0, -1).join(" › ")}</small>}
           </p>
         )}
@@ -189,6 +239,17 @@ export default function TemplatesPanel() {
           <div className="tpl-history">
             {profile.calibration_history.map((entry, idx) => (
               <small key={idx}>✓ {formatCalibrationLine(entry)}</small>
+            ))}
+          </div>
+        )}
+
+        {profile.evidence_refs && profile.evidence_refs.length > 0 && (
+          <div className="tpl-refs">
+            <span>Belege:</span>
+            {profile.evidence_refs.map((r, idx) => (
+              <a key={`${r.ref}-${idx}`} href={r.ref} target="_blank" rel="noreferrer">
+                {r.label ?? r.ref} ↗
+              </a>
             ))}
           </div>
         )}
@@ -308,7 +369,38 @@ export default function TemplatesPanel() {
               <input value={newOutUnit} onChange={(e) => setNewOutUnit(e.target.value)} maxLength={20} placeholder="g, ml, %" />
             </label>
           </div>
+          <label className="zg-toggle">
+            <input type="checkbox" checked={autoEnrich} onChange={(e) => setAutoEnrich(e.target.checked)} />
+            Beim Speichern automatisch mit OLS-Taxonomie &amp; OpenAlex-Literatur (bei KI-Prior) anreichern
+          </label>
+          {enrichPreview && (
+            <div className="tpl-preview-box">
+              {enrichPreview.existing_matches.length > 0 && (
+                <div className="tpl-dup-warn" role="status">
+                  <strong>Ähnliche Vorlagen gefunden ({enrichPreview.existing_matches.length}):</strong>{" "}
+                  {enrichPreview.existing_matches.map((m) => `${m.name} [${m.match_reason}]`).join(" · ")}
+                </div>
+              )}
+              {enrichPreview.taxonomy && (
+                <div>
+                  <strong>OLS-Taxonomie:</strong> <em>{enrichPreview.taxonomy.scientific_name}</em> ({enrichPreview.taxonomy.ontology_id})
+                </div>
+              )}
+              {enrichPreview.literature_refs.length > 0 && (
+                <div>
+                  <strong>OpenAlex-Belege ({enrichPreview.literature_refs.length}):</strong>{" "}
+                  {enrichPreview.literature_refs.map((r) => r.label).join(" · ")}
+                </div>
+              )}
+              {!enrichPreview.taxonomy && enrichPreview.existing_matches.length === 0 && enrichPreview.literature_refs.length === 0 && (
+                <div>Keine vorhandenen Duplikate oder externen Treffer gefunden.</div>
+              )}
+            </div>
+          )}
           <div className="zg-goal-actions">
+            <button type="button" className="secondary-action" disabled={busy || previewBusy} onClick={handlePreviewEnrichment}>
+              {previewBusy ? "Prüft …" : "OLS & Literatur vorab prüfen"}
+            </button>
             <button type="submit" className="save-button" disabled={busy}>
               Vorlage speichern <span aria-hidden="true">↗</span>
             </button>

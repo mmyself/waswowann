@@ -15,6 +15,7 @@ import type {
   PeriodicityReport,
   PublicConfig,
   TemplateCatalogResponse,
+  TemplateEnrichPreview,
   TemplateKind,
   TemplateMaturity,
   WorldlineInspection,
@@ -287,9 +288,11 @@ export const api = {
     domain: string;
     category: string;
     scientific_name?: string;
+    ontology_id?: string;
     canonical_name?: string;
     taxon_path?: string[];
     aliases?: string[];
+    evidence_refs?: Array<{ kind?: string; ref: string; label?: string }>;
     template_kind?: TemplateKind;
     parent_id?: string;
     duration_seconds?: number;
@@ -300,9 +303,30 @@ export const api = {
     output_sigma?: number;
     output_unit?: string;
     notes?: string;
+    auto_enrich?: boolean;
   }) =>
-    request<{ template: Record<string, unknown>; catalog: TemplateCatalogResponse }>(
-      "/api/zukunftsgraph/templates",
-      { method: "POST", body: JSON.stringify(payload) }
-    ),
+    request<{
+      template: Record<string, unknown>;
+      catalog: TemplateCatalogResponse;
+      enrichment?: {
+        taxonomy_applied: boolean;
+        literature_added: number;
+        existing_matches: Array<Record<string, unknown>>;
+      };
+    }>("/api/zukunftsgraph/templates", { method: "POST", body: JSON.stringify(payload) }),
+  previewTemplateEnrichment: (params: {
+    name: string;
+    scientific_name?: string;
+    category?: string;
+    domain?: string;
+    duration_source?: "ai_prior" | "measured" | "derived";
+  }) => {
+    const qs = new URLSearchParams();
+    qs.set("name", params.name);
+    if (params.scientific_name) qs.set("scientific_name", params.scientific_name);
+    if (params.category) qs.set("category", params.category);
+    if (params.domain) qs.set("domain", params.domain);
+    if (params.duration_source) qs.set("duration_source", params.duration_source);
+    return request<TemplateEnrichPreview>(`/api/zukunftsgraph/templates/enrich-preview?${qs.toString()}`);
+  },
 };

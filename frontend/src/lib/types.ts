@@ -494,6 +494,7 @@ export interface TemplateProfile {
   domain: string;
   category: string;
   scientific_name: string | null;
+  ontology_id: string | null;
   canonical_name: string | null;
   taxon_path: string[];
   aliases: string[];
@@ -507,7 +508,40 @@ export interface TemplateProfile {
   observations_count: number;
   maturity: TemplateMaturity;
   calibration_history: Array<Record<string, unknown>>;
+  evidence_refs: Array<{
+    kind?: string;
+    ref: string;
+    label?: string;
+    year?: number;
+    cited_by_count?: number;
+  }>;
   child_count: number;
+}
+
+export interface TemplateEnrichPreview {
+  existing_matches: Array<{
+    id: string;
+    name: string;
+    scientific_name: string | null;
+    ontology_id: string | null;
+    maturity: TemplateMaturity;
+    observations_count: number;
+    match_reason: string;
+  }>;
+  taxonomy: {
+    ontology_id: string;
+    scientific_name: string;
+    synonyms: string[];
+    taxon_path: string[];
+    iri: string;
+  } | null;
+  literature_refs: Array<{
+    kind: string;
+    ref: string;
+    label: string;
+    year?: number | null;
+    cited_by_count?: number | null;
+  }>;
 }
 
 export interface TemplateCatalogItem {

@@ -198,13 +198,17 @@ def test_mcp_define_and_search_with_scientific_name(settings: Settings) -> None:
                     "category": "Pilz",
                     "domain": "pilzzucht",
                     "scientific_name": "Pleurotus ostreatus",
+                    "ontology_id": "NCBITaxon:5322",
                     "aliases": ["Austernpilz", "Oyster Mushroom"],
+                    "evidence_refs": [{"kind": "doi", "ref": "https://doi.org/10.1000/pleurotus", "label": "Pleurotus study"}],
                     "template_kind": "step",
                     "duration_seconds": 14 * 86_400,
                 },
             )
         )
         assert defined["profile"]["scientific_name"] == "Pleurotus ostreatus"
+        assert defined["profile"]["ontology_id"] == "NCBITaxon:5322"
+        assert len(defined["profile"]["evidence_refs"]) == 1
 
         found = _decode_tool(
             await server.call_tool(
@@ -214,5 +218,13 @@ def test_mcp_define_and_search_with_scientific_name(settings: Settings) -> None:
         )
         assert found["count"] == 1
         assert "Oyster Mushroom" in found["templates"][0]["profile"]["aliases"]
+
+        by_onto = _decode_tool(
+            await server.call_tool(
+                "search_templates",
+                {"scientific_name": "NCBITaxon:5322"},
+            )
+        )
+        assert by_onto["count"] == 1
 
     asyncio.run(flow())

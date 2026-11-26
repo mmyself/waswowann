@@ -178,11 +178,20 @@ def extract_template_profile(
         obs_count = max((_infer_observations_count(c) for c in children), default=0)
     maturity = _infer_maturity(tpl, obs_count)
     history = meta.get("calibration_history") if isinstance(meta.get("calibration_history"), list) else []
+    onto_raw = meta.get("ontology_id")
+    ontology_id = str(onto_raw).strip() if isinstance(onto_raw, str) and onto_raw.strip() else None
+    raw_refs = meta.get("evidence_refs")
+    evidence_refs = (
+        [dict(r) for r in raw_refs if isinstance(r, dict) and r.get("ref")]
+        if isinstance(raw_refs, list)
+        else []
+    )
 
     return {
         "domain": domain,
         "category": category,
         "scientific_name": scientific_name,
+        "ontology_id": ontology_id,
         "canonical_name": canonical_name,
         "taxon_path": taxon_path,
         "aliases": aliases,
@@ -196,6 +205,7 @@ def extract_template_profile(
         "observations_count": obs_count,
         "maturity": maturity,
         "calibration_history": history,
+        "evidence_refs": evidence_refs,
         "child_count": len(children),
     }
 
@@ -402,6 +412,7 @@ def search_template_catalog(
         if sci_needle:
             sci_candidates = [
                 profile["scientific_name"] or "",
+                profile["ontology_id"] or "",
                 profile["canonical_name"] or "",
                 *profile["taxon_path"],
                 *(str(c.meta.get("scientific_name") or c.meta.get("species") or "") for c in children),

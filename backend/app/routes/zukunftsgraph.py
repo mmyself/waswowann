@@ -29,6 +29,14 @@ from metacore.models import (
 )
 from metacore.rollup import RollupWindowKind
 from metacore.templates import TemplateKind, TemplateMaturity, extract_template_profile, search_template_catalog
+from app.services.science_enrichment import (
+    _looks_biological,
+    _clean_query_for_taxon,
+    find_existing_template_matches,
+    lookup_ols_taxon,
+    lookup_openalex_references,
+    preview_template_enrichment,
+)
 
 router = APIRouter(prefix="/api/zukunftsgraph", tags=["zukunftsgraph"])
 
@@ -145,6 +153,9 @@ class MetaTemplateCreateRequest(BaseModel):
     output_unit: str = Field(default="", max_length=40)
     applies_to: dict[str, Any] = Field(default_factory=dict)
     notes: str = Field(default="", max_length=2000)
+    ontology_id: str | None = Field(default=None, max_length=80)
+    evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
+    auto_enrich: bool = True
 
 
 @router.get("/snapshot")
@@ -449,6 +460,25 @@ def get_templates(
     )
 
 
+@router.get("/templates/enrich-preview")
+def get_templates_enrich_preview(
+    name: str = Query(default=""),
+    scientific_name: str | None = Query(default=None),
+    category: str = Query(default="general"),
+    domain: str = Query(default="general"),
+    duration_source: DurationSource = Query(default="ai_prior"),
+) -> dict[str, Any]:
+    repo, _ = open_metacore()
+    return preview_template_enrichment(
+        repo,
+        name=name,
+        scientific_name=scientific_name,
+        category=category,
+        domain=domain,
+        duration_source=duration_source,
+    )
+
+
 @router.post("/templates", status_code=201)
 def post_template(payload: MetaTemplateCreateRequest) -> dict[str, Any]:
     repo, _ = open_metacore()
@@ -468,6 +498,51 @@ def post_template(payload: MetaTemplateCreateRequest) -> dict[str, Any]:
             formula["output_sigma"] = payload.output_sigma
 
     sci = payload.scientific_name.strip() if payload.scientific_name and payload.scientific_name.strip() else None
+    onto_id = payload.ontology_id.strip() if payload.ontology_id and payload.ontology_id.strip() else None
+    taxon_path = [t.strip() for t in payload.taxon_path if t.strip()]
+    aliases = [a.strip() for a in payload.aliases if a.strip()]
+    evidence_refs = [dict(r) for r in payload.evidence_refs if isinstance(r, dict) and r.get("ref")]
+
+    taxonomy_applied = False
+    literature_added = 0
+
+    if payload.auto_enrich:
+        if (not onto_id or not taxon_path) and _looks_biological(
+            name=payload.name,
+            scientific_name=sci,
+            category=payload.category,
+            domain=payload.domain,
+        ):
+            taxon = lookup_ols_taxon(_clean_query_for_taxon(payload.name, sci))
+            if taxon is not None:
+                taxonomy_applied = True
+                if not onto_id:
+                    onto_id = taxon["ontology_id"]
+                if not sci:
+                    sci = taxon["scientific_name"]
+                if not taxon_path:
+                    taxon_path = list(taxon["taxon_path"])
+                seen_low = {a.lower() for a in aliases}
+                for syn in taxon.get("synonyms") or []:
+                    if syn.lower() not in seen_low:
+                        seen_low.add(syn.lower())
+                        aliases.append(syn)
+
+        if payload.duration_source == "ai_prior" and not evidence_refs:
+            found_refs = lookup_openalex_references(
+                _clean_query_for_taxon(payload.name, None) or payload.name,
+                scientific_name=sci,
+            )
+            if found_refs:
+                evidence_refs = found_refs
+                literature_added = len(found_refs)
+
+    existing_matches = find_existing_template_matches(
+        repo,
+        name=payload.name,
+        scientific_name=sci,
+    )
+
     canon = (
         payload.canonical_name.strip()
         if payload.canonical_name and payload.canonical_name.strip()
@@ -479,12 +554,16 @@ def post_template(payload: MetaTemplateCreateRequest) -> dict[str, Any]:
     }
     if sci:
         meta["scientific_name"] = sci
+    if onto_id:
+        meta["ontology_id"] = onto_id
     if canon:
         meta["canonical_name"] = canon
-    if payload.taxon_path:
-        meta["taxon_path"] = [t.strip() for t in payload.taxon_path if t.strip()]
-    if payload.aliases:
-        meta["aliases"] = [a.strip() for a in payload.aliases if a.strip()]
+    if taxon_path:
+        meta["taxon_path"] = taxon_path
+    if aliases:
+        meta["aliases"] = aliases
+    if evidence_refs:
+        meta["evidence_refs"] = evidence_refs
     if payload.template_kind:
         meta["template_kind"] = payload.template_kind
     if payload.applies_to:
@@ -513,4 +592,9 @@ def post_template(payload: MetaTemplateCreateRequest) -> dict[str, Any]:
         "template": tpl.model_dump(),
         "profile": extract_template_profile(tpl),
         "catalog": search_template_catalog(repo, only_roots=True),
+        "enrichment": {
+            "taxonomy_applied": taxonomy_applied,
+            "literature_added": literature_added,
+            "existing_matches": existing_matches,
+        },
     }

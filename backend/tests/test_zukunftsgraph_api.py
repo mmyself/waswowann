@@ -378,6 +378,7 @@ def test_template_catalog_create_search_and_entity_matching(client: TestClient, 
             "output_value": 120.0,
             "output_sigma": 20.0,
             "output_unit": "g",
+            "auto_enrich": False,
         },
     )
     assert created.status_code == 201
@@ -394,3 +395,62 @@ def test_template_catalog_create_search_and_entity_matching(client: TestClient, 
     match = next(item for item in by_ent.json()["templates"] if item["template"]["name"] == "Igel-Stachelbart Klon-Test")
     assert match["match_score"] >= 60.0
     assert any("Hericium erinaceus" in reason for reason in match["match_reasons"])
+
+
+def test_template_auto_enrichment_preview_and_create(client: TestClient, monkeypatch):
+    from app.routes import zukunftsgraph as zg_route
+    from app.services import science_enrichment
+
+    fake_taxon = {
+        "ontology_id": "NCBITaxon:5322",
+        "scientific_name": "Pleurotus ostreatus",
+        "synonyms": ["oyster mushroom", "Agaricus ostreatus"],
+        "taxon_path": ["Fungi", "Basidiomycota", "Pleurotus", "Pleurotus ostreatus"],
+        "iri": "http://purl.obolibrary.org/obo/NCBITaxon_5322",
+    }
+    fake_refs = [
+        {
+            "kind": "doi",
+            "ref": "https://doi.org/10.1000/pleurotus-test",
+            "label": "Pleurotus cultivation yield (2024, Fungal Biology)",
+            "year": 2024,
+            "cited_by_count": 42,
+        }
+    ]
+    monkeypatch.setattr(science_enrichment, "lookup_ols_taxon", lambda q, **kw: fake_taxon)
+    monkeypatch.setattr(zg_route, "lookup_ols_taxon", lambda q, **kw: fake_taxon)
+    monkeypatch.setattr(science_enrichment, "lookup_openalex_references", lambda q, **kw: fake_refs)
+    monkeypatch.setattr(zg_route, "lookup_openalex_references", lambda q, **kw: fake_refs)
+
+    # Create a first template to trigger duplicate warning in preview
+    first = client.post(
+        "/api/zukunftsgraph/templates",
+        headers=HEADERS,
+        json={
+            "name": "Austernseitling Grundrezept",
+            "driver": "actor",
+            "domain": "pilzzucht",
+            "category": "Pilz",
+            "aliases": ["Austernpilz"],
+            "duration_source": "ai_prior",
+            "auto_enrich": True,
+        },
+    )
+    assert first.status_code == 201
+    body = first.json()
+    assert body["enrichment"]["taxonomy_applied"] is True
+    assert body["enrichment"]["literature_added"] == 1
+    prof = body["profile"]
+    assert prof["ontology_id"] == "NCBITaxon:5322"
+    assert prof["scientific_name"] == "Pleurotus ostreatus"
+    assert "oyster mushroom" in prof["aliases"]
+    assert prof["evidence_refs"][0]["ref"] == "https://doi.org/10.1000/pleurotus-test"
+
+    preview = client.get(
+        "/api/zukunftsgraph/templates/enrich-preview?name=Austernseitling&scientific_name=Pleurotus%20ostreatus&category=Pilz&domain=pilzzucht"
+    )
+    assert preview.status_code == 200
+    pdata = preview.json()
+    assert pdata["taxonomy"]["ontology_id"] == "NCBITaxon:5322"
+    assert len(pdata["literature_refs"]) == 1
+    assert len(pdata["existing_matches"]) >= 1

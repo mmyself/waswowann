@@ -242,6 +242,8 @@ def create_server(config: Settings | None = None) -> FastMCP:
         aliases: list[str] | None = None,
         template_kind: TemplateKind | None = None,
         applies_to: dict[str, Any] | None = None,
+        ontology_id: str | None = None,
+        evidence_refs: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Speichert eine wiederverwendbare zeit-/ortlose Vorlage inkl. wissenschaftlichem Namen, Aliasen, Taxonomie & Verschachtelung."""
         merged_meta = dict(meta or {})
@@ -260,6 +262,10 @@ def create_server(config: Settings | None = None) -> FastMCP:
             merged_meta["template_kind"] = template_kind
         if applies_to is not None:
             merged_meta["applies_to"] = applies_to
+        if ontology_id is not None and ontology_id.strip():
+            merged_meta["ontology_id"] = ontology_id.strip()
+        if evidence_refs is not None:
+            merged_meta["evidence_refs"] = [r for r in evidence_refs if isinstance(r, dict) and r.get("ref")]
         tpl = repo.create_transformation(
             TransformationCreate(
                 name=name,
